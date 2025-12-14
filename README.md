@@ -1,73 +1,98 @@
-# Nutrition Chatbot API (FastAPI)
+# Nutrition Chat API (FastAPI)
 
-API phân tích món ăn/dinh dưỡng, có thể gọi từ React Native/Expo hoặc bất kỳ HTTP client nào. Kèm storage SQLite cho daily logs bệnh nhân.
+API phân tích bữa ăn gắn với bệnh nhân (`patientId` bắt buộc), lưu ngày ăn uống vào SQLite, hỗ trợ chỉnh sửa món/khẩu phần và xem lịch sử.
 
-## Chạy server nhanh
+## Chạy nhanh
 ```bash
 cd /Users/hus/WORKSPACE/Python/datn
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
-- Health: http://localhost:8000/
-- Swagger: http://localhost:8000/docs
+- Health: http://localhost:8000/  
+- Swagger: http://localhost:8000/docs  
 - Thiết bị thật/Expo: dùng IP LAN (Android emulator: http://10.0.2.2:8000).
 
 ## Biến môi trường
 - `DEEPSEEK_API_KEY` (tùy chọn) và `DEEPSEEK_BASE_URL` nếu cần. Không có key vẫn chạy local; DeepSeek chỉ bật khi key tồn tại và độ tin cậy thấp.
 
-## Lưu trữ (DBS)
-- File SQLite: `nutrition.db` tự tạo tại thư mục dự án.
-- Bảng `daily_logs` lưu: `patient_id`, `day (YYYY-MM-DD)`, `daily_totals`, `meals[]`, `last_updated`.
+## Lưu trữ
+- SQLite file: `nutrition.db` tự tạo tại thư mục dự án.
+- Bảng `daily_logs`: `patient_id`, `day (YYYY-MM-DD)`, `daily_totals`, `meals/entries`, `last_updated`. Index: (patient_id, day). `entryId` unique trong phạm vi patient.
 
 ## Endpoints chính
 - `GET /` — health check.
-- `POST /analyze` — phân tích text -> foods, meal_summary, memory/daily totals, DeepSeek fallback khi cần.
-  ```json
-  { "text": "2 tô bún chả và 1 ly sữa đậu nành", "user_id": "optional-id" }
-  ```
-- `POST /update-quantity` — cập nhật món trong lần nhập gần nhất.
-  ```json
-  { "food_name": "bún chả", "new_quantity": 3, "new_unit": "tô" }
-  ```
-- `POST /reset-daily` — reset tổng ngày.
-- `POST /reset-memory` — xóa bộ nhớ hội thoại gần nhất.
-- `GET /statistics` — tổng hợp memory/daily/recent foods.
 
-## Endpoints DBS (daily logs bệnh nhân)
-- `GET /patients/{patientId}` hoặc `/patients/{patientId}/daily-logs` — trả toàn bộ daily_logs (mảng, rỗng nếu chưa có).
-- `GET /patients/{patientId}/daily-logs/{day}` — lấy log 1 ngày; trả `{}` nếu không tồn tại.
-- `POST /patients/{patientId}/daily-logs` — tạo/cập nhật log.
+- `POST /analyze` — phân tích text cho 1 bệnh nhân, tạo entry mới trong ngày (`dateKey`).
   ```json
   {
-    "day": "2024-12-15",
-    "daily_totals": { "calories": 1200, "carbs": 180, "sugar": 40, "protein": 70, "fat": 30, "fiber": 15 },
-    "meals": [
-      {
-        "timestamp": "2024-12-15T08:00:00",
-        "text": "2 bát cơm và thịt kho",
-        "meal_summary": { "calories": 600, "carbs": 90, "sugar": 10, "protein": 30, "fat": 15, "fiber": 4 },
-        "foods": [
-          { "food_name": "cơm trắng", "quantity_info": { "amount": 2, "unit": "bát", "type": "relative", "confidence": 0.9 }, "estimated_weight_g": 320, "category": "rice" }
-        ]
-      }
-    ],
-    "last_updated": "2024-12-15T12:00:00"
+    "patientId": "patient_001",
+    "userId": "mobile",
+    "text": "2 tô bún chả và 1 ly sữa đậu nành",
+    "dateKey": "2025-12-15",
+    "locale": "vi-VN"
   }
   ```
-- `DELETE /patients/{patientId}/daily-logs/{day}` — xóa log ngày, trả `success: true/false`.
+  Trả: `{ success, data: { foods[], mealSummary }, meta: { patientId, requestId(entryId), createdAt } }`.
 
-## Gọi mẫu từ client (React Native/Expo)
-```ts
-const API = "http://<IP>:8000";
+- `POST /update-quantity` — chỉnh khẩu phần/đơn vị món (tìm món theo tên trong ngày).
+  ```json
+  {
+    "patientId": "patient_001",
+    "userId": "mobile",
+    "foodName": "Bún chả",
+    "newQuantity": 1.5,
+    "newUnit": "tô",
+    "dateKey": "2025-12-15",
+    "source": "inline_edit"
+  }
+  ```
+  Trả: `{ success, data: { patientId, foodName, savedQuantity, savedUnit, ruleId } }`.
 
-export async function analyzeFood(text: string) {
-  const res = await fetch(`${API}/analyze`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, user_id: "mobile" })
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
+- `POST /update-food` — patch 1 món trong entry (sửa tên/khẩu phần/macro).
+  ```json
+  {
+    "patientId": "patient_001",
+    "userId": "mobile",
+    "entryId": "1734260000000",
+    "foodId": "tmp_1",
+    "patch": {
+      "foodName": "Bún chả",
+      "quantityInfo": { "amount": 1.5, "unit": "tô" },
+      "nutrition": { "calories": 650, "carbs": 70, "sugar": 8, "protein": 28, "fat": 22, "fiber": 4 }
+    }
+  }
+  ```
+  Trả: `{ success, data: { patientId, entryId, foodId, updatedAt } }`.
+
+- `POST /delete-food` — xoá 1 món khỏi entry.
+  ```json
+  { "patientId": "patient_001", "userId": "mobile", "entryId": "1734260000000", "foodId": "tmp_1" }
+  ```
+  Trả: `{ success, data: { patientId, entryId, deletedFoodId, mealSummary } }`.
+
+- `POST /confirm-meal` — xác nhận bữa (✓ Tổng bữa này), có thể gửi `finalData`.
+  ```json
+  {
+    "patientId": "patient_001",
+    "userId": "mobile",
+    "entryId": "1734260000000",
+    "dateKey": "2025-12-15",
+    "confirmed": true,
+    "finalData": { "foods": [...], "mealSummary": {...} }
+  }
+  ```
+  Trả: `{ success, data: { patientId, entryId, status, confirmedAt } }`.
+
+- `GET /history?patientId=patient_001&from=2025-12-01&to=2025-12-15` — lịch sử ăn uống trong khoảng ngày.
+  Trả: `{ success, data: { patientId, days: { "YYYY-MM-DD": { totals, entries[] } } } }`.
+
+## Quy ước lỗi
+```json
+{ "success": false, "error": { "code": "VALIDATION_ERROR", "message": "patientId is required" } }
 ```
+
+## Ghi chú
+- Pipeline vẫn chạy local extraction; DeepSeek chỉ bật khi có key và độ tin cậy thấp.  
+- Nutrition dữ liệu/ước lượng nằm trong `vietnamese_foods_extended.py`.  
+- Mọi response dùng camelCase theo spec.
