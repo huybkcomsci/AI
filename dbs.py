@@ -1,12 +1,9 @@
 """
 SQLite-backed storage for patient daily nutrition logs.
 
-Schema (table daily_logs):
-- patient_id (TEXT, PK with day)
-- day (TEXT, YYYY-MM-DD)
-- daily_totals (JSON string)
-- meals (JSON string)
-- last_updated (ISO timestamp)
+Schema:
+- patients: patient_id (TEXT PK), created_at
+- daily_logs: patient_id (TEXT), day (YYYY-MM-DD), daily_totals (JSON), meals (JSON), last_updated (ISO)
 """
 import json
 import sqlite3
@@ -42,6 +39,14 @@ class DailyLogDB:
         with self._connect() as conn:
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS patients (
+                    patient_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS daily_logs (
                     patient_id TEXT NOT NULL,
                     day TEXT NOT NULL,
@@ -51,6 +56,20 @@ class DailyLogDB:
                     PRIMARY KEY (patient_id, day)
                 )
                 """
+            )
+            conn.commit()
+
+    def ensure_patient(self, patient_id: str) -> None:
+        """Create patient row if not exists."""
+        if not patient_id:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO patients (patient_id, created_at)
+                VALUES (?, ?)
+                """,
+                (patient_id, datetime.utcnow().isoformat() + "Z"),
             )
             conn.commit()
 
@@ -75,6 +94,7 @@ class DailyLogDB:
 
     def get_patient_logs(self, patient_id: str) -> List[Dict[str, Any]]:
         """Return all logs for a patient (empty list if none)."""
+        self.ensure_patient(patient_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -91,6 +111,7 @@ class DailyLogDB:
 
     def get_daily_log(self, patient_id: str, day: str) -> Optional[Dict[str, Any]]:
         """Return a log for a given day or None."""
+        self.ensure_patient(patient_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 """
@@ -124,6 +145,7 @@ class DailyLogDB:
     ) -> Dict[str, Any]:
         """Create/update a daily log. Kept for backward compatibility."""
         last_updated = last_updated or datetime.now().isoformat()
+        self.ensure_patient(patient_id)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -153,11 +175,13 @@ class DailyLogDB:
 
     def save_day(self, patient_id: str, day: str, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Persist a full day's entries and derived totals."""
+        self.ensure_patient(patient_id)
         totals = self._recalc_totals(entries)
         return self.upsert_daily_log(patient_id, day, totals, entries)
 
     def append_entry(self, patient_id: str, day: str, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Append a new entry to a patient's day."""
+        self.ensure_patient(patient_id)
         log = self.get_daily_log(patient_id, day)
         entries = list(log.get("entries", [])) if log else []
         entries.append(entry)
@@ -220,6 +244,7 @@ class DailyLogDB:
 
     def delete_daily_log(self, patient_id: str, day: str) -> bool:
         """Delete a log, return True if removed."""
+        self.ensure_patient(patient_id)
         with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM daily_logs WHERE patient_id = ? AND day = ?",
@@ -238,6 +263,7 @@ class DailyLogDB:
         Return a mapping of day -> {totals, entries} within range.
         date_from/date_to inclusive, expect format YYYY-MM-DD.
         """
+        self.ensure_patient(patient_id)
         query = """
             SELECT day, daily_totals, meals, last_updated
             FROM daily_logs

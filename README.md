@@ -84,7 +84,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
   ```
   Trả: `{ success, data: { patientId, entryId, status, confirmedAt } }`.
 
-- `GET /history?patientId=patient_001&from=2025-12-01&to=2025-12-15` — lịch sử ăn uống trong khoảng ngày.
+- `GET /history?patientId=patient_001&from=2025-12-01&to=2025-12-15` — lịch sử ăn uống trong khoảng ngày. Nếu patient chưa tồn tại, hệ thống tự tạo patient rỗng và trả về `days: {}`.
   Trả: `{ success, data: { patientId, days: { "YYYY-MM-DD": { totals, entries[] } } } }`.
 
 ## Quy ước lỗi
