@@ -17,6 +17,15 @@ from typing import Any, Dict, List, Optional
 
 DB_PATH = Path(__file__).resolve().parent / "nutrition.db"
 
+DEFAULT_TOTALS = {
+    "calories": 0,
+    "carbs": 0,
+    "sugar": 0,
+    "protein": 0,
+    "fat": 0,
+    "fiber": 0,
+}
+
 
 class DailyLogDB:
     """Lightweight wrapper around sqlite for storing daily logs."""
@@ -59,8 +68,8 @@ class DailyLogDB:
         return {
             "patientId": patient_id,
             "day": day,
-            "daily_totals": daily_totals,
-            "meals": meals,
+            "totals": daily_totals or DEFAULT_TOTALS.copy(),
+            "entries": meals or [],
             "last_updated": last_updated,
         }
 
@@ -97,6 +106,14 @@ class DailyLogDB:
             return None
         return self._row_to_log(patient_id, row)
 
+    def _recalc_totals(self, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        totals = DEFAULT_TOTALS.copy()
+        for entry in entries or []:
+            summary = entry.get("mealSummary", {})
+            for key in totals:
+                totals[key] += float(summary.get(key, 0) or 0)
+        return totals
+
     def upsert_daily_log(
         self,
         patient_id: str,
@@ -105,7 +122,7 @@ class DailyLogDB:
         meals: List[Dict[str, Any]],
         last_updated: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Create/update a daily log."""
+        """Create/update a daily log. Kept for backward compatibility."""
         last_updated = last_updated or datetime.now().isoformat()
         with self._connect() as conn:
             conn.execute(
@@ -126,14 +143,80 @@ class DailyLogDB:
                 ),
             )
             conn.commit()
-
         return self.get_daily_log(patient_id, day) or {
             "patientId": patient_id,
             "day": day,
-            "daily_totals": daily_totals,
-            "meals": meals,
+            "totals": daily_totals,
+            "entries": meals,
             "last_updated": last_updated,
         }
+
+    def save_day(self, patient_id: str, day: str, entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Persist a full day's entries and derived totals."""
+        totals = self._recalc_totals(entries)
+        return self.upsert_daily_log(patient_id, day, totals, entries)
+
+    def append_entry(self, patient_id: str, day: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Append a new entry to a patient's day."""
+        log = self.get_daily_log(patient_id, day)
+        entries = list(log.get("entries", [])) if log else []
+        entries.append(entry)
+        return self.save_day(patient_id, day, entries)
+
+    def update_entry(
+        self,
+        patient_id: str,
+        day: str,
+        entry_id: str,
+        updater,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Apply an updater(entry_dict) -> entry_dict to the matched entry.
+        Returns updated day log or None if entry not found.
+        """
+        log = self.get_daily_log(patient_id, day)
+        if not log:
+            return None
+
+        entries = []
+        found = False
+        for entry in log.get("entries", []):
+            if entry.get("entryId") == entry_id:
+                entry = updater(dict(entry))
+                found = True
+            entries.append(entry)
+
+        if not found:
+            return None
+
+        return self.save_day(patient_id, day, entries)
+
+    def delete_food_in_entry(
+        self,
+        patient_id: str,
+        day: str,
+        entry_id: str,
+        food_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Delete a food from an entry and recalc totals."""
+        def updater(entry: Dict[str, Any]) -> Dict[str, Any]:
+            foods = [f for f in entry.get("foods", []) if f.get("foodId") != food_id]
+            entry["foods"] = foods
+            entry["mealSummary"] = self._recalc_meal_summary(foods)
+            return entry
+
+        return self.update_entry(patient_id, day, entry_id, updater)
+
+    def _recalc_meal_summary(self, foods: List[Dict[str, Any]]) -> Dict[str, Any]:
+        summary = {
+            "foodCount": len(foods),
+            **DEFAULT_TOTALS,
+        }
+        for food in foods:
+            nutrition = food.get("nutrition", {})
+            for key in DEFAULT_TOTALS:
+                summary[key] += float(nutrition.get(key, 0) or 0)
+        return summary
 
     def delete_daily_log(self, patient_id: str, day: str) -> bool:
         """Delete a log, return True if removed."""
@@ -144,3 +227,44 @@ class DailyLogDB:
             )
             conn.commit()
             return cursor.rowcount > 0
+
+    def get_history(
+        self,
+        patient_id: str,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return a mapping of day -> {totals, entries} within range.
+        date_from/date_to inclusive, expect format YYYY-MM-DD.
+        """
+        query = """
+            SELECT day, daily_totals, meals, last_updated
+            FROM daily_logs
+            WHERE patient_id = ?
+        """
+        params: List[Any] = [patient_id]
+        if date_from and date_to:
+            query += " AND day BETWEEN ? AND ?"
+            params.extend([date_from, date_to])
+        elif date_from:
+            query += " AND day >= ?"
+            params.append(date_from)
+        elif date_to:
+            query += " AND day <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY day DESC"
+
+        with self._connect() as conn:
+            cursor = conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+
+        days = {}
+        for row in rows:
+            log = self._row_to_log(patient_id, row)
+            days[log["day"]] = {
+                "totals": log.get("totals", DEFAULT_TOTALS.copy()),
+                "entries": log.get("entries", []),
+            }
+        return {"patientId": patient_id, "days": days}
