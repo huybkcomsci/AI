@@ -1,10 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import uvicorn
 
 from nutrition_pipeline_advanced import NutritionPipelineAdvanced
+from dbs import DailyLogDB
 
 app = FastAPI(title="Nutrition Chatbot API", version="1.0.0")
 
@@ -19,6 +20,7 @@ app.add_middleware(
 
 # Khởi tạo pipeline
 pipeline = NutritionPipelineAdvanced()
+daily_log_db = DailyLogDB()
 
 # Models
 class FoodInput(BaseModel):
@@ -29,6 +31,34 @@ class UpdateQuantity(BaseModel):
     food_name: str
     new_quantity: int
     new_unit: Optional[str] = None
+
+
+# DBS models
+class MealSummary(BaseModel):
+    calories: float = 0
+    carbs: float = 0
+    sugar: float = 0
+    protein: float = 0
+    fat: float = 0
+    fiber: float = 0
+
+class FoodSnapshot(BaseModel):
+    food_name: str
+    quantity_info: Dict[str, Any]
+    estimated_weight_g: Optional[float] = None
+    category: Optional[str] = None
+
+class MealEntry(BaseModel):
+    timestamp: str
+    text: str
+    meal_summary: MealSummary
+    foods: List[FoodSnapshot] = []
+
+class UpsertDailyLogRequest(BaseModel):
+    day: str  # YYYY-MM-DD
+    daily_totals: MealSummary
+    meals: List[MealEntry] = []
+    last_updated: Optional[str] = None
 
 # Routes
 @app.get("/")
@@ -94,6 +124,47 @@ async def update_quantity(update: UpdateQuantity):
         return {"success": True, "message": "Đã cập nhật số lượng"}
     else:
         return {"success": False, "message": "Không tìm thấy món ăn để cập nhật"}
+
+# DBS CRUD
+@app.get("/patients/{patient_id}")
+async def get_patient_daily_logs(patient_id: str):
+    """Nhập patientId, trả về toàn bộ daily_logs (rỗng nếu chưa có)."""
+    logs = daily_log_db.get_patient_logs(patient_id)
+    return {"success": True, "patientId": patient_id, "daily_logs": logs}
+
+@app.get("/patients/{patient_id}/daily-logs")
+async def list_daily_logs(patient_id: str):
+    """Liệt kê daily_logs của patient."""
+    logs = daily_log_db.get_patient_logs(patient_id)
+    return {"success": True, "patientId": patient_id, "daily_logs": logs}
+
+@app.get("/patients/{patient_id}/daily-logs/{day}")
+async def get_daily_log(patient_id: str, day: str):
+    """Lấy log theo ngày (YYYY-MM-DD)."""
+    log = daily_log_db.get_daily_log(patient_id, day)
+    return {
+        "success": bool(log),
+        "patientId": patient_id,
+        "log": log or {}
+    }
+
+@app.post("/patients/{patient_id}/daily-logs")
+async def upsert_daily_log(patient_id: str, payload: UpsertDailyLogRequest):
+    """Tạo/cập nhật daily log cho bệnh nhân."""
+    log = daily_log_db.upsert_daily_log(
+        patient_id=patient_id,
+        day=payload.day,
+        daily_totals=payload.daily_totals.model_dump(),
+        meals=[meal.model_dump() for meal in payload.meals],
+        last_updated=payload.last_updated
+    )
+    return {"success": True, "patientId": patient_id, "log": log}
+
+@app.delete("/patients/{patient_id}/daily-logs/{day}")
+async def delete_daily_log(patient_id: str, day: str):
+    """Xóa daily log theo ngày."""
+    deleted = daily_log_db.delete_daily_log(patient_id, day)
+    return {"success": deleted, "patientId": patient_id}
 
 # Test endpoints
 @app.get("/test-samples")
