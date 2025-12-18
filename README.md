@@ -19,6 +19,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ## Lưu trữ
 - SQLite file: `nutrition.db` tự tạo tại thư mục dự án.
 - Bảng `daily_logs`: `patient_id`, `day (YYYY-MM-DD)`, `daily_totals`, `meals/entries`, `last_updated`. Index: (patient_id, day). `entryId` unique trong phạm vi patient.
+- Bảng học thêm (tự động khi DeepSeek được dùng và trả về món):
+  - `learned_aliases`: map `alias` → `canonical_name` để tăng khả năng match local.
+  - `learned_foods`: lưu món mới tối thiểu (tên + aliases + metadata) để lần sau nhận diện không cần DeepSeek.
 
 ## Endpoints chính
 - `GET /` — health check.
@@ -94,5 +97,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ## Ghi chú
 - Pipeline vẫn chạy local extraction; DeepSeek chỉ bật khi có key và độ tin cậy thấp.  
+- Nếu input có cụm “không đường / no sugar / unsweetened” trong cùng segment món, hệ thống sẽ ép `sugar = 0` cho món đó (và lưu cờ `noSugar` trong food object).  
+- Khi DeepSeek được dùng và thành công, hệ thống sẽ lưu alias/món vào SQLite để “học” cho các lần chạy sau.  
 - Nutrition dữ liệu/ước lượng nằm trong `vietnamese_foods_extended.py`.  
 - Mọi response dùng camelCase theo spec.

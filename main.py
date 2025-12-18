@@ -96,6 +96,7 @@ def to_spec_foods(foods: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     mapped = []
     for idx, food in enumerate(foods, start=1):
         qty = food.get("quantity_info", food.get("quantityInfo", {})) or {}
+        no_sugar = bool(food.get("no_sugar") or food.get("noSugar"))
         mapped.append(
             {
                 "foodId": food.get("foodId") or f"tmp_{idx}",
@@ -107,6 +108,7 @@ def to_spec_foods(foods: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "confidence": qty.get("confidence", 1.0),
                 },
                 "nutrition": food.get("nutrition", {}),
+                **({"noSugar": True} if no_sugar else {}),
             }
         )
     return mapped
@@ -138,6 +140,7 @@ def recalc_food_nutrition(food: Dict[str, Any]) -> Dict[str, Any]:
     qty = food.get("quantityInfo", {}) or {}
     name = food.get("foodName") or ""
     category = VIETNAMESE_FOODS_NUTRITION.get(name, {}).get("category")
+    no_sugar = bool(food.get("noSugar"))
     quantity_info = {
         "amount": qty.get("amount"),
         "unit": qty.get("unit"),
@@ -145,7 +148,10 @@ def recalc_food_nutrition(food: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": qty.get("confidence", 1.0),
     }
     weight = estimate_weight(quantity_info, category)
-    food["nutrition"] = calculate_nutrition(name, weight)
+    nutrition = calculate_nutrition(name, weight) or {}
+    if no_sugar and isinstance(nutrition, dict):
+        nutrition["sugar"] = 0.0
+    food["nutrition"] = nutrition
     return food
 
 
@@ -301,6 +307,8 @@ async def update_food(request: UpdateFoodRequest):
                     food["nutrition"] = {**food.get("nutrition", {}), **patch.nutrition}
                 else:
                     recalc_food_nutrition(food)
+                if food.get("noSugar") and isinstance(food.get("nutrition"), dict):
+                    food["nutrition"]["sugar"] = 0.0
                 changed["ok"] = True
                 break
         entry["mealSummary"] = calc_meal_summary_from_foods(entry.get("foods", []))

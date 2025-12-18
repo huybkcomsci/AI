@@ -5,6 +5,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 from config import Config
 from deepseek_client import DeepSeekClient
+from dbs import FoodLearningDB
 
 # Import các class và functions từ chính module này
 try:
@@ -143,6 +144,7 @@ class NutritionPipelineAdvanced:
     def __init__(self):
         self.extractor = FoodExtractor()
         self.deepseek_client = DeepSeekClient()
+        self.learning_db = FoodLearningDB()
         self.memory = ConversationMemory(max_messages=3)
         self.daily_totals = {
             'calories': 0,
@@ -224,6 +226,7 @@ class NutritionPipelineAdvanced:
         """Phân tích chi tiết một món ăn"""
         food_name = food_info['food_name']
         quantity_info = food_info['quantity_info']
+        no_sugar = bool(food_info.get('no_sugar') or food_info.get('noSugar'))
         match_confidence = float(food_info.get('match_confidence', 1.0) or 0.0)
         quantity_confidence = float(quantity_info.get('confidence', 0.7) or 0.0)
         combined_confidence = max(0.0, min(1.0, round(match_confidence * quantity_confidence, 2)))
@@ -237,7 +240,9 @@ class NutritionPipelineAdvanced:
         weight = estimate_weight(quantity_info, food_data.get('category'))
         
         # Tính dinh dưỡng
-        nutrition = calculate_nutrition(food_name, weight)
+        nutrition = calculate_nutrition(food_name, weight) or {}
+        if no_sugar and isinstance(nutrition, dict):
+            nutrition['sugar'] = 0.0
         
         return {
             'food_name': food_name,
@@ -247,7 +252,8 @@ class NutritionPipelineAdvanced:
             'nutrition': nutrition,
             'category': food_data.get('category'),
             'confidence': combined_confidence,
-            'match_confidence': match_confidence
+            'match_confidence': match_confidence,
+            'no_sugar': no_sugar
         }
 
     def _should_use_deepseek(
@@ -279,6 +285,9 @@ class NutritionPipelineAdvanced:
             if ds_raw.get("success") and not foods:
                 error = "DeepSeek did not return recognizable foods"
 
+            if success:
+                self._persist_deepseek_learnings(foods)
+
             return {
                 "success": success,
                 "foods": foods,
@@ -304,10 +313,14 @@ class NutritionPipelineAdvanced:
             raw_name = raw.get('food_name') or raw.get('name') or raw.get('item')
             if not raw_name:
                 continue
+
+            raw_name = str(raw_name).strip()
+            no_sugar = self._detect_no_sugar(raw_name)
+            match_name = self._strip_no_sugar(raw_name) if no_sugar else raw_name
             
-            matched_name, match_confidence = self.extractor.matcher.find_food(str(raw_name))
+            matched_name, match_confidence = self.extractor.matcher.find_food(str(match_name))
             if not matched_name:
-                matched_name = str(raw_name).strip()
+                matched_name = str(match_name).strip()
                 match_confidence = 0.5
 
             qty_data = raw.get('quantity') or raw.get('quantity_info') or {}
@@ -345,7 +358,13 @@ class NutritionPipelineAdvanced:
 
             category = VIETNAMESE_FOODS_NUTRITION.get(matched_name, {}).get('category')
             weight = estimate_weight(quantity_info, category)
-            nutrition = calculate_nutrition(matched_name, weight) if matched_name in VIETNAMESE_FOODS_NUTRITION else {}
+            nutrition = (
+                (calculate_nutrition(matched_name, weight) or {})
+                if matched_name in VIETNAMESE_FOODS_NUTRITION
+                else {}
+            )
+            if no_sugar and isinstance(nutrition, dict):
+                nutrition['sugar'] = 0.0
 
             normalized.append({
                 'food_name': matched_name,
@@ -355,10 +374,83 @@ class NutritionPipelineAdvanced:
                 'nutrition': nutrition,
                 'category': category,
                 'confidence': combined_confidence,
-                'match_confidence': match_confidence
+                'match_confidence': match_confidence,
+                'raw_food_name': raw_name,
+                'no_sugar': no_sugar
             })
 
         return normalized
+
+    def _detect_no_sugar(self, text: str) -> bool:
+        """Detect 'không đường' / 'no sugar' markers in a food label."""
+        if not text:
+            return False
+        normalized = self.extractor.matcher.normalize_text(text)
+        if not normalized:
+            return False
+        if re.search(r"\b(khong|ko|k0)\s*(co\s*)?duong\b", normalized):
+            return True
+        if "no sugar" in normalized or "sugar free" in normalized or "unsweetened" in normalized:
+            return True
+        return False
+
+    def _strip_no_sugar(self, text: str) -> str:
+        """Remove 'không đường' markers for better food name matching."""
+        if not text:
+            return text
+        result = re.sub(
+            r"(không|khong|ko|k0)\s*(có\s*)?đường",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"(khong|ko|k0)\s*(co\s*)?duong",
+            " ",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(r"\bno\s*sugar\b", " ", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bsugar\s*free\b", " ", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bunsweetened\b", " ", result, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", result).strip()
+
+    def _persist_deepseek_learnings(self, foods: List[Dict[str, Any]]) -> None:
+        """
+        Persist foods/aliases seen via DeepSeek into SQLite so future requests can be handled locally.
+        """
+        if not foods:
+            return
+
+        for food in foods:
+            canonical = (food.get('food_name') or "").strip()
+            if not canonical:
+                continue
+
+            raw_name = (food.get('raw_food_name') or "").strip()
+            alias = self._strip_no_sugar(raw_name) if raw_name else ""
+            if not alias:
+                alias = canonical
+
+            if canonical in VIETNAMESE_FOODS_NUTRITION:
+                # Add new alias for an existing food.
+                self.learning_db.upsert_alias(alias, canonical, source="deepseek")
+                self.extractor.matcher.add_alias(alias, canonical)
+                continue
+
+            # Unknown food: persist a minimal placeholder food so it becomes matchable locally.
+            minimal_food = {
+                "calories_per_100g": 0,
+                "carbs_per_100g": 0,
+                "sugar_per_100g": 0,
+                "protein_per_100g": 0,
+                "fat_per_100g": 0,
+                "fiber_per_100g": 0,
+                "aliases": [alias],
+                "category": "custom",
+            }
+            self.learning_db.upsert_food(canonical, minimal_food, source="deepseek")
+            self.extractor.matcher.add_food(canonical, minimal_food)
     
     def _check_if_update(self, analyzed_foods: List[Dict]) -> bool:
         """Kiểm tra xem có phải là cập nhật số lượng không"""

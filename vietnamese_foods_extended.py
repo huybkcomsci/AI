@@ -3,6 +3,9 @@ import json
 from typing import Dict, List, Tuple, Optional, Any
 import random
 
+# Prevent repeated DB reads when multiple matchers are created.
+_LEARNED_LOADED = False
+
 # Database món ăn với nhiều biến thể chính tả
 VIETNAMESE_FOODS_NUTRITION = {
     # === CƠM VÀ MÓN CHÍNH ===
@@ -2659,6 +2662,87 @@ UNIT_CONVERSION = {**BASE_UNIT_CONVERSION}
 for alias, target in UNIT_ALIASES.items():
     if target in BASE_UNIT_CONVERSION:
         UNIT_CONVERSION[alias] = BASE_UNIT_CONVERSION[target]
+
+
+def load_learned_foods(force: bool = False) -> None:
+    """
+    Load learned foods/aliases (persisted in SQLite) into `VIETNAMESE_FOODS_NUTRITION`.
+
+    This enriches local matching so future requests can be handled without DeepSeek.
+    """
+    global _LEARNED_LOADED
+    if _LEARNED_LOADED and not force:
+        return
+
+    try:
+        from dbs import FoodLearningDB
+    except Exception:
+        _LEARNED_LOADED = True
+        return
+
+    try:
+        db = FoodLearningDB()
+        learned_foods = db.get_learned_foods()
+        learned_aliases = db.get_learned_aliases()
+    except Exception:
+        _LEARNED_LOADED = True
+        return
+
+    # Merge learned foods into the in-memory dataset.
+    for food_name, food_data in (learned_foods or {}).items():
+        if not food_name:
+            continue
+        if not isinstance(food_data, dict):
+            food_data = {}
+
+        existing = VIETNAMESE_FOODS_NUTRITION.get(food_name)
+        if isinstance(existing, dict):
+            existing_aliases = existing.get("aliases")
+            if not isinstance(existing_aliases, list):
+                existing_aliases = []
+            incoming_aliases = food_data.get("aliases", [])
+            if isinstance(incoming_aliases, list):
+                for alias in incoming_aliases:
+                    if alias and alias not in existing_aliases:
+                        existing_aliases.append(alias)
+            if food_name not in existing_aliases:
+                existing_aliases.append(food_name)
+            existing["aliases"] = existing_aliases
+            if not existing.get("category") and food_data.get("category"):
+                existing["category"] = food_data["category"]
+            VIETNAMESE_FOODS_NUTRITION[food_name] = existing
+        else:
+            data = dict(food_data)
+            aliases = data.get("aliases")
+            if not isinstance(aliases, list):
+                aliases = []
+            if food_name not in aliases:
+                aliases.append(food_name)
+            data["aliases"] = aliases
+            data.setdefault("category", "custom")
+            VIETNAMESE_FOODS_NUTRITION[food_name] = data
+
+    # Merge learned aliases into canonical foods.
+    for mapping in learned_aliases or []:
+        alias = (mapping.get("alias") or "").strip()
+        canonical = (mapping.get("canonical_name") or "").strip()
+        if not alias or not canonical:
+            continue
+        if canonical not in VIETNAMESE_FOODS_NUTRITION:
+            continue
+        canonical_data = VIETNAMESE_FOODS_NUTRITION.get(canonical, {})
+        if not isinstance(canonical_data, dict):
+            continue
+        aliases = canonical_data.get("aliases")
+        if not isinstance(aliases, list):
+            aliases = []
+        if alias not in aliases:
+            aliases.append(alias)
+        canonical_data["aliases"] = aliases
+        VIETNAMESE_FOODS_NUTRITION[canonical] = canonical_data
+
+    _LEARNED_LOADED = True
+
 
 class FoodNameMatcher:
     """Xử lý chính tả và tìm kiếm món ăn"""
