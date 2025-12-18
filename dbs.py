@@ -294,3 +294,112 @@ class DailyLogDB:
                 "entries": log.get("entries", []),
             }
         return {"patientId": patient_id, "days": days}
+
+
+class FoodLearningDB:
+    """
+    SQLite-backed storage for learned foods/aliases (from DeepSeek).
+
+    Tables:
+    - learned_foods: store new foods with minimal nutrition per 100g/ml + aliases
+    - learned_aliases: map a raw alias -> an existing canonical food_name
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_schema()
+
+    def _connect(self):
+        return sqlite3.connect(self.db_path)
+
+    def _ensure_schema(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learned_foods (
+                    food_name TEXT PRIMARY KEY,
+                    food_data TEXT NOT NULL,
+                    source TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learned_aliases (
+                    alias TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL,
+                    source TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
+    def upsert_alias(self, alias: str, canonical_name: str, source: str = "deepseek") -> None:
+        alias = (alias or "").strip()
+        canonical_name = (canonical_name or "").strip()
+        if not alias or not canonical_name:
+            return
+
+        now = datetime.utcnow().isoformat() + "Z"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO learned_aliases (alias, canonical_name, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(alias) DO UPDATE SET
+                    canonical_name = excluded.canonical_name,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (alias, canonical_name, source, now, now),
+            )
+            conn.commit()
+
+    def upsert_food(self, food_name: str, food_data: Dict[str, Any], source: str = "deepseek") -> None:
+        food_name = (food_name or "").strip()
+        if not food_name:
+            return
+
+        now = datetime.utcnow().isoformat() + "Z"
+        payload = json.dumps(food_data or {}, ensure_ascii=False)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO learned_foods (food_name, food_data, source, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(food_name) DO UPDATE SET
+                    food_data = excluded.food_data,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at
+                """,
+                (food_name, payload, source, now, now),
+            )
+            conn.commit()
+
+    def get_learned_foods(self) -> Dict[str, Dict[str, Any]]:
+        """Return {food_name: food_data_dict}."""
+        with self._connect() as conn:
+            cursor = conn.execute("SELECT food_name, food_data FROM learned_foods")
+            rows = cursor.fetchall()
+
+        foods: Dict[str, Dict[str, Any]] = {}
+        for food_name, raw in rows:
+            try:
+                foods[food_name] = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                foods[food_name] = {}
+        return foods
+
+    def get_learned_aliases(self) -> List[Dict[str, str]]:
+        """Return list of {alias, canonical_name}."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "SELECT alias, canonical_name FROM learned_aliases"
+            )
+            rows = cursor.fetchall()
+        return [{"alias": alias, "canonical_name": canonical} for alias, canonical in rows]

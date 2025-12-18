@@ -2664,6 +2664,13 @@ class FoodNameMatcher:
     """Xử lý chính tả và tìm kiếm món ăn"""
     
     def __init__(self):
+        # Merge foods/aliases learned from DeepSeek (persisted in SQLite)
+        # before building the search index.
+        try:
+            load_learned_foods()
+        except Exception:
+            # Defensive: learned foods are optional and should not break startup.
+            pass
         self.build_index()
     
     def build_index(self):
@@ -2783,6 +2790,69 @@ class FoodNameMatcher:
         
         return best_match
 
+    def add_alias(self, alias: str, food_name: str) -> None:
+        """Add an alias -> canonical mapping to the in-memory matcher."""
+        alias = (alias or "").strip()
+        food_name = (food_name or "").strip()
+        if not alias or not food_name:
+            return
+        normalized_alias = self.normalize_text(alias)
+        if not normalized_alias:
+            return
+        self.alias_map[normalized_alias] = food_name
+
+    def add_food(self, food_name: str, food_data: dict) -> None:
+        """
+        Add/update a food in the global dataset and update this matcher's index.
+        `food_data` should follow the same structure as `VIETNAMESE_FOODS_NUTRITION` values.
+        """
+        food_name = (food_name or "").strip()
+        if not food_name:
+            return
+
+        if not isinstance(food_data, dict):
+            food_data = {}
+
+        # Ensure the food exists in the shared dataset.
+        existing = VIETNAMESE_FOODS_NUTRITION.get(food_name)
+        if existing and isinstance(existing, dict):
+            for k, v in food_data.items():
+                if k == "aliases":
+                    continue
+                if v is not None:
+                    existing[k] = v
+            aliases = existing.get("aliases")
+            if not isinstance(aliases, list):
+                aliases = []
+            new_aliases = food_data.get("aliases", [])
+            if isinstance(new_aliases, list):
+                for alias in new_aliases:
+                    if alias and alias not in aliases:
+                        aliases.append(alias)
+            if food_name not in aliases:
+                aliases.append(food_name)
+            existing["aliases"] = aliases
+            VIETNAMESE_FOODS_NUTRITION[food_name] = existing
+        else:
+            data = dict(food_data)
+            aliases = data.get("aliases")
+            if not isinstance(aliases, list):
+                aliases = []
+            if food_name not in aliases:
+                aliases.append(food_name)
+            data["aliases"] = aliases
+            data.setdefault("category", "custom")
+            VIETNAMESE_FOODS_NUTRITION[food_name] = data
+
+        # Update this matcher's searchable maps.
+        normalized_name = self.normalize_text(food_name)
+        if normalized_name:
+            self.food_map[normalized_name] = food_name
+        for alias in VIETNAMESE_FOODS_NUTRITION.get(food_name, {}).get("aliases", []) or []:
+            normalized_alias = self.normalize_text(alias)
+            if normalized_alias:
+                self.alias_map[normalized_alias] = food_name
+
 class QuantityParser:
     """Phân tích định lượng với sai số"""
     
@@ -2889,6 +2959,40 @@ class FoodExtractor:
     def __init__(self):
         self.matcher = FoodNameMatcher()
         self.parser = QuantityParser()
+
+    def _has_no_sugar(self, text: str) -> bool:
+        """Detect 'không đường' / 'no sugar' markers in the same food segment."""
+        normalized = self.matcher.normalize_text(text)
+        if not normalized:
+            return False
+
+        if re.search(r"\b(khong|ko|k0)\s*(co\s*)?duong\b", normalized):
+            return True
+        if "no sugar" in normalized or "sugar free" in normalized or "unsweetened" in normalized:
+            return True
+        return False
+
+    def _remove_no_sugar_from_text(self, text: str) -> str:
+        """Remove 'không đường' markers to avoid hurting food name matching."""
+        if not text:
+            return text
+
+        result = re.sub(
+            r"(không|khong|ko|k0)\s*(có\s*)?đường",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(
+            r"(khong|ko|k0)\s*(co\s*)?duong",
+            " ",
+            result,
+            flags=re.IGNORECASE,
+        )
+        result = re.sub(r"\bno\s*sugar\b", " ", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bsugar\s*free\b", " ", result, flags=re.IGNORECASE)
+        result = re.sub(r"\bunsweetened\b", " ", result, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", result).strip()
         
     def extract(self, text):
         """Trích xuất các món ăn từ text"""
@@ -2913,10 +3017,14 @@ class FoodExtractor:
             # Loại bỏ stop words trong từng phần
             clean_part = part
             for word in stop_words:
-                clean_part = re.sub(rf'\\b{re.escape(word)}\\b', ' ', clean_part)
+                clean_part = re.sub(rf'\b{re.escape(word)}\b', ' ', clean_part)
             clean_part = re.sub(r'\s+', ' ', clean_part).strip()
             if not clean_part:
                 continue
+
+            no_sugar = self._has_no_sugar(clean_part)
+            if no_sugar:
+                clean_part = self._remove_no_sugar_from_text(clean_part)
             
             # Tìm định lượng
             quantity_info = self.parser.parse(clean_part)
@@ -2933,7 +3041,8 @@ class FoodExtractor:
                     'food_name': food_name,
                     'match_confidence': match_confidence,
                     'quantity_info': quantity_info,
-                    'extracted_food_text': food_text
+                    'extracted_food_text': food_text,
+                    'no_sugar': no_sugar
                 })
         
         return foods
