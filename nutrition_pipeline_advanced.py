@@ -432,11 +432,25 @@ class NutritionPipelineAdvanced:
             if not alias:
                 alias = canonical
 
-            suggested_action = "alias" if canonical in VIETNAMESE_FOODS_NUTRITION else "new_food"
+            # Only add to pending when the food is unknown (or matched with very low confidence),
+            # to avoid noise when DeepSeek returns a mix of known + unknown foods.
+            try:
+                match_confidence = float(food.get("match_confidence", 0) or 0)
+            except Exception:
+                match_confidence = 0.0
+
+            canonical_in_db = canonical in VIETNAMESE_FOODS_NUTRITION
+            if canonical_in_db and match_confidence >= 0.6:
+                continue
+
+            suggested_action = "new_food"
+            candidate_name = alias.strip()
+            if not candidate_name:
+                continue
 
             self.learning_db.upsert_pending_food(
-                raw_name=alias,
-                canonical_name=canonical,
+                raw_name=candidate_name,
+                canonical_name=candidate_name,
                 suggested_action=suggested_action,
                 confidence=food.get("confidence"),
                 example_input=user_input,

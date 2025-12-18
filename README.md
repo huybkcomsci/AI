@@ -118,5 +118,6 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 - Pipeline vẫn chạy local extraction; DeepSeek chỉ bật khi có key và độ tin cậy thấp.  
 - Nếu input có cụm “không đường / no sugar / unsweetened” trong cùng segment món, hệ thống sẽ ép `sugar = 0` cho món đó (và lưu cờ `noSugar` trong food object).  
 - Khi DeepSeek được dùng và thành công, hệ thống sẽ lưu vào `pending_foods`; admin duyệt xong mới merge vào database tra cứu.  
+  (Chỉ lưu các món “lạ” hoặc match rất thấp; món đã có trong database thường không đưa vào pending để tránh noise.)  
 - Nutrition dữ liệu/ước lượng nằm trong `vietnamese_foods_extended.py`.  
 - Mọi response dùng camelCase theo spec.
