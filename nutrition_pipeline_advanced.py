@@ -286,7 +286,7 @@ class NutritionPipelineAdvanced:
                 error = "DeepSeek did not return recognizable foods"
 
             if success:
-                self._persist_deepseek_learnings(foods)
+                self._persist_deepseek_pending(user_input, foods)
 
             return {
                 "success": success,
@@ -415,9 +415,9 @@ class NutritionPipelineAdvanced:
         result = re.sub(r"\bunsweetened\b", " ", result, flags=re.IGNORECASE)
         return re.sub(r"\s+", " ", result).strip()
 
-    def _persist_deepseek_learnings(self, foods: List[Dict[str, Any]]) -> None:
+    def _persist_deepseek_pending(self, user_input: str, foods: List[Dict[str, Any]]) -> None:
         """
-        Persist foods/aliases seen via DeepSeek into SQLite so future requests can be handled locally.
+        Persist DeepSeek foods into a pending table for admin approval.
         """
         if not foods:
             return
@@ -432,25 +432,16 @@ class NutritionPipelineAdvanced:
             if not alias:
                 alias = canonical
 
-            if canonical in VIETNAMESE_FOODS_NUTRITION:
-                # Add new alias for an existing food.
-                self.learning_db.upsert_alias(alias, canonical, source="deepseek")
-                self.extractor.matcher.add_alias(alias, canonical)
-                continue
+            suggested_action = "alias" if canonical in VIETNAMESE_FOODS_NUTRITION else "new_food"
 
-            # Unknown food: persist a minimal placeholder food so it becomes matchable locally.
-            minimal_food = {
-                "calories_per_100g": 0,
-                "carbs_per_100g": 0,
-                "sugar_per_100g": 0,
-                "protein_per_100g": 0,
-                "fat_per_100g": 0,
-                "fiber_per_100g": 0,
-                "aliases": [alias],
-                "category": "custom",
-            }
-            self.learning_db.upsert_food(canonical, minimal_food, source="deepseek")
-            self.extractor.matcher.add_food(canonical, minimal_food)
+            self.learning_db.upsert_pending_food(
+                raw_name=alias,
+                canonical_name=canonical,
+                suggested_action=suggested_action,
+                confidence=food.get("confidence"),
+                example_input=user_input,
+                source="deepseek",
+            )
     
     def _check_if_update(self, analyzed_foods: List[Dict]) -> bool:
         """Kiểm tra xem có phải là cập nhật số lượng không"""

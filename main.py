@@ -1,4 +1,5 @@
 from datetime import datetime
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
@@ -9,9 +10,11 @@ from pydantic import BaseModel, Field
 from nutrition_pipeline_advanced import NutritionPipelineAdvanced
 from dbs import DailyLogDB, DEFAULT_TOTALS
 from vietnamese_foods_extended import (
+    UNIT_CONVERSION,
+    VIETNAMESE_FOODS_NUTRITION,
     calculate_nutrition,
     estimate_weight,
-    VIETNAMESE_FOODS_NUTRITION,
+    load_learned_foods,
 )
 
 
@@ -79,6 +82,14 @@ class ConfirmMealRequest(BaseModel):
     dateKey: str
     confirmed: bool = True
     finalData: Optional[Dict[str, Any]] = None
+
+
+class ReviewPendingFoodRequest(BaseModel):
+    pendingId: int = Field(..., description="pending_foods.id")
+    decision: str = Field(..., description="approve|reject")
+    canonicalName: Optional[str] = None
+    action: Optional[str] = Field(None, description="alias|new_food")
+    foodData: Optional[Dict[str, Any]] = None
 
 
 # ----------------------------
@@ -428,6 +439,164 @@ async def history(
 
     history_data = daily_log_db.get_history(patientId, from_date, to_date)
     return {"success": True, "data": history_data}
+
+
+@app.get("/foods")
+async def list_foods(
+    q: Optional[str] = Query(None, description="Search by food name"),
+    limit: int = Query(200, ge=1, le=2000),
+    offset: int = Query(0, ge=0),
+):
+    query = (q or "").strip().lower()
+
+    foods = []
+    for food_name, data in VIETNAMESE_FOODS_NUTRITION.items():
+        if query and query not in str(food_name).lower():
+            continue
+        data = data or {}
+        aliases = data.get("aliases", [])
+        if not isinstance(aliases, list):
+            aliases = []
+
+        foods.append(
+            {
+                "foodName": food_name,
+                "category": data.get("category"),
+                "aliases": aliases,
+            }
+        )
+
+    foods.sort(key=lambda x: str(x.get("foodName", "")).lower())
+    sliced = foods[offset : offset + limit]
+
+    units = []
+    for unit_name in sorted(UNIT_CONVERSION.keys()):
+        info = UNIT_CONVERSION.get(unit_name) or {}
+        if isinstance(info, dict):
+            units.append({"unit": unit_name, **info})
+        else:
+            units.append({"unit": unit_name})
+
+    return {
+        "success": True,
+        "data": {
+            "foods": sliced,
+            "totalFoods": len(foods),
+            "units": units,
+        },
+    }
+
+
+@app.get("/admin/pending-foods")
+async def admin_pending_foods(
+    status: str = Query("pending", description="pending|approved|rejected"),
+    action: Optional[str] = Query(None, description="alias|new_food"),
+    q: Optional[str] = Query(None, description="Search raw/canonical names"),
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    items = pipeline.learning_db.get_pending_foods(
+        status=status,
+        action=action,
+        query=q,
+        limit=limit,
+        offset=offset,
+    )
+    return {"success": True, "data": {"items": items}}
+
+
+@app.post("/admin/review-pending-food")
+async def admin_review_pending_food(request: ReviewPendingFoodRequest):
+    decision = (request.decision or "").strip().lower()
+    if decision not in {"approve", "reject"}:
+        return error_response("VALIDATION_ERROR", "decision must be approve|reject")
+
+    pending = pipeline.learning_db.get_pending_food(request.pendingId)
+    if not pending:
+        return error_response("NOT_FOUND", "Pending food not found")
+
+    if decision == "reject":
+        ok = pipeline.learning_db.reject_pending_food(request.pendingId)
+        if not ok:
+            return error_response("NOT_FOUND", "Pending food not found")
+        updated = pipeline.learning_db.get_pending_food(request.pendingId)
+        return {"success": True, "data": {"pending": updated}}
+
+    action = (request.action or pending.get("suggestedAction") or "").strip().lower()
+    if action and action not in {"alias", "new_food"}:
+        return error_response("VALIDATION_ERROR", "action must be alias|new_food")
+
+    approved = pipeline.learning_db.approve_pending_food(
+        request.pendingId,
+        canonical_name=request.canonicalName,
+        action=action or None,
+        food_data=request.foodData,
+        source="admin",
+    )
+    if not approved:
+        return error_response("NOT_FOUND", "Pending food not found")
+
+    # Refresh in-memory dataset & matcher so approval takes effect without restart.
+    load_learned_foods(force=True)
+    pipeline.extractor.matcher.build_index()
+
+    return {"success": True, "data": {"pending": approved}}
+
+
+@app.get("/analytics/food-trends")
+async def analytics_food_trends(
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+    limit: int = Query(20, ge=1, le=200),
+):
+    food_counts: Dict[str, int] = defaultdict(int)
+    food_patients: Dict[str, set] = defaultdict(set)
+    day_food_counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    days_seen: set = set()
+
+    for patient_id, day, entries in daily_log_db.iter_entries_all_patients(from_date, to_date):
+        days_seen.add(day)
+        for entry in entries or []:
+            for food in entry.get("foods", []) or []:
+                name = food.get("foodName") or food.get("food_name")
+                if not name:
+                    continue
+                name = str(name).strip()
+                if not name:
+                    continue
+                food_counts[name] += 1
+                food_patients[name].add(patient_id)
+                day_food_counts[day][name] += 1
+
+    days = sorted(days_seen)
+    ranked = sorted(food_counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+    top_foods = [
+        {
+            "foodName": food_name,
+            "count": count,
+            "uniquePatients": len(food_patients.get(food_name, set())),
+        }
+        for food_name, count in ranked
+    ]
+
+    trend = {
+        "days": days,
+        "foods": {
+            food_name: [day_food_counts[day].get(food_name, 0) for day in days]
+            for food_name, _ in ranked
+        },
+    }
+
+    return {
+        "success": True,
+        "data": {
+            "from": from_date,
+            "to": to_date,
+            "topFoods": top_foods,
+            "trend": trend,
+        },
+    }
 
 
 if __name__ == "__main__":

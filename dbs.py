@@ -9,7 +9,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
 DB_PATH = Path(__file__).resolve().parent / "nutrition.db"
@@ -295,14 +295,52 @@ class DailyLogDB:
             }
         return {"patientId": patient_id, "days": days}
 
+    def iter_entries_all_patients(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+    ) -> Iterator[Tuple[str, str, List[Dict[str, Any]]]]:
+        """
+        Yield (patient_id, day, entries) for all patients within date range (inclusive).
+        Expects day format YYYY-MM-DD.
+        """
+        query = """
+            SELECT patient_id, day, meals
+            FROM daily_logs
+            WHERE 1=1
+        """
+        params: List[Any] = []
+
+        if date_from and date_to:
+            query += " AND day BETWEEN ? AND ?"
+            params.extend([date_from, date_to])
+        elif date_from:
+            query += " AND day >= ?"
+            params.append(date_from)
+        elif date_to:
+            query += " AND day <= ?"
+            params.append(date_to)
+
+        query += " ORDER BY day ASC"
+
+        with self._connect() as conn:
+            cursor = conn.execute(query, tuple(params))
+            for patient_id, day, meals_raw in cursor:
+                try:
+                    entries = json.loads(meals_raw) if meals_raw else []
+                except json.JSONDecodeError:
+                    entries = []
+                yield patient_id, day, entries or []
+
 
 class FoodLearningDB:
     """
-    SQLite-backed storage for learned foods/aliases (from DeepSeek).
+    SQLite-backed storage for food curation workflow.
 
     Tables:
-    - learned_foods: store new foods with minimal nutrition per 100g/ml + aliases
-    - learned_aliases: map a raw alias -> an existing canonical food_name
+    - pending_foods: DeepSeek suggestions awaiting admin approval
+    - learned_foods: approved foods (merged into local lookup dataset)
+    - learned_aliases: approved alias -> canonical mappings (merged into local lookup dataset)
     """
 
     def __init__(self, db_path: Path = DB_PATH):
@@ -315,6 +353,24 @@ class FoodLearningDB:
 
     def _ensure_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pending_foods (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    raw_name TEXT NOT NULL,
+                    canonical_name TEXT NOT NULL,
+                    suggested_action TEXT NOT NULL,
+                    confidence REAL,
+                    example_input TEXT,
+                    source TEXT,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    seen_count INTEGER NOT NULL,
+                    UNIQUE(raw_name, canonical_name)
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS learned_foods (
@@ -338,6 +394,281 @@ class FoodLearningDB:
                 """
             )
             conn.commit()
+
+    def upsert_pending_food(
+        self,
+        raw_name: str,
+        canonical_name: str,
+        suggested_action: str,
+        confidence: Optional[float] = None,
+        example_input: Optional[str] = None,
+        source: str = "deepseek",
+    ) -> None:
+        raw_name = (raw_name or "").strip()
+        canonical_name = (canonical_name or "").strip()
+        suggested_action = (suggested_action or "").strip().lower()
+
+        if not raw_name or not canonical_name:
+            return
+
+        if suggested_action not in {"alias", "new_food"}:
+            suggested_action = "new_food"
+
+        now = datetime.utcnow().isoformat() + "Z"
+
+        def coerce_conf(val: Optional[float]) -> Optional[float]:
+            if val is None:
+                return None
+            try:
+                return float(val)
+            except Exception:
+                return None
+
+        confidence_value = coerce_conf(confidence)
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO pending_foods (
+                    raw_name, canonical_name, suggested_action,
+                    confidence, example_input, source,
+                    status, created_at, updated_at, seen_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
+                ON CONFLICT(raw_name, canonical_name) DO UPDATE SET
+                    suggested_action = excluded.suggested_action,
+                    confidence = CASE
+                        WHEN pending_foods.confidence IS NULL THEN excluded.confidence
+                        WHEN excluded.confidence IS NULL THEN pending_foods.confidence
+                        ELSE MAX(pending_foods.confidence, excluded.confidence)
+                    END,
+                    example_input = COALESCE(excluded.example_input, pending_foods.example_input),
+                    source = excluded.source,
+                    updated_at = excluded.updated_at,
+                    seen_count = pending_foods.seen_count + 1,
+                    status = CASE
+                        WHEN pending_foods.status = 'approved' THEN 'approved'
+                        ELSE 'pending'
+                    END
+                """,
+                (
+                    raw_name,
+                    canonical_name,
+                    suggested_action,
+                    confidence_value,
+                    example_input,
+                    source,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+    def get_pending_foods(
+        self,
+        status: str = "pending",
+        action: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        status = (status or "pending").strip().lower()
+        if status not in {"pending", "approved", "rejected"}:
+            status = "pending"
+
+        action = (action or "").strip().lower() or None
+        if action and action not in {"alias", "new_food"}:
+            action = None
+
+        limit = max(1, min(int(limit or 200), 1000))
+        offset = max(0, int(offset or 0))
+
+        sql = """
+            SELECT
+                id, raw_name, canonical_name, suggested_action,
+                confidence, example_input, source,
+                status, created_at, updated_at, seen_count
+            FROM pending_foods
+            WHERE status = ?
+        """
+        params: List[Any] = [status]
+
+        if action:
+            sql += " AND suggested_action = ?"
+            params.append(action)
+
+        if query:
+            q = f"%{query.strip()}%"
+            sql += " AND (raw_name LIKE ? OR canonical_name LIKE ?)"
+            params.extend([q, q])
+
+        sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        with self._connect() as conn:
+            cursor = conn.execute(sql, tuple(params))
+            rows = cursor.fetchall()
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            (
+                row_id,
+                raw_name,
+                canonical_name,
+                suggested_action,
+                confidence_value,
+                example_input,
+                source,
+                row_status,
+                created_at,
+                updated_at,
+                seen_count,
+            ) = row
+            result.append(
+                {
+                    "id": row_id,
+                    "rawName": raw_name,
+                    "canonicalName": canonical_name,
+                    "suggestedAction": suggested_action,
+                    "confidence": confidence_value,
+                    "exampleInput": example_input,
+                    "source": source,
+                    "status": row_status,
+                    "createdAt": created_at,
+                    "updatedAt": updated_at,
+                    "seenCount": seen_count,
+                }
+            )
+        return result
+
+    def get_pending_food(self, pending_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            pending_id = int(pending_id)
+        except Exception:
+            return None
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                SELECT
+                    id, raw_name, canonical_name, suggested_action,
+                    confidence, example_input, source,
+                    status, created_at, updated_at, seen_count
+                FROM pending_foods
+                WHERE id = ?
+                """,
+                (pending_id,),
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return None
+
+        (
+            row_id,
+            raw_name,
+            canonical_name,
+            suggested_action,
+            confidence_value,
+            example_input,
+            source,
+            row_status,
+            created_at,
+            updated_at,
+            seen_count,
+        ) = row
+        return {
+            "id": row_id,
+            "rawName": raw_name,
+            "canonicalName": canonical_name,
+            "suggestedAction": suggested_action,
+            "confidence": confidence_value,
+            "exampleInput": example_input,
+            "source": source,
+            "status": row_status,
+            "createdAt": created_at,
+            "updatedAt": updated_at,
+            "seenCount": seen_count,
+        }
+
+    def set_pending_status(self, pending_id: int, status: str) -> bool:
+        try:
+            pending_id = int(pending_id)
+        except Exception:
+            return False
+
+        status = (status or "").strip().lower()
+        if status not in {"pending", "approved", "rejected"}:
+            return False
+
+        now = datetime.utcnow().isoformat() + "Z"
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE pending_foods SET status = ?, updated_at = ? WHERE id = ?",
+                (status, now, pending_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
+    def approve_pending_food(
+        self,
+        pending_id: int,
+        canonical_name: Optional[str] = None,
+        action: Optional[str] = None,
+        food_data: Optional[Dict[str, Any]] = None,
+        source: str = "admin",
+    ) -> Optional[Dict[str, Any]]:
+        pending = self.get_pending_food(pending_id)
+        if not pending:
+            return None
+
+        raw_name = (pending.get("rawName") or "").strip()
+        canonical_from_pending = (pending.get("canonicalName") or "").strip()
+        suggested_action = (pending.get("suggestedAction") or "").strip().lower()
+
+        canonical = (canonical_name or canonical_from_pending).strip()
+        chosen_action = (action or suggested_action).strip().lower()
+        if chosen_action not in {"alias", "new_food"}:
+            chosen_action = suggested_action if suggested_action in {"alias", "new_food"} else "new_food"
+
+        if not canonical:
+            return None
+
+        if chosen_action == "alias":
+            self.upsert_alias(raw_name, canonical, source=source)
+        else:
+            minimal_food = {
+                "calories_per_100g": 0,
+                "carbs_per_100g": 0,
+                "sugar_per_100g": 0,
+                "protein_per_100g": 0,
+                "fat_per_100g": 0,
+                "fiber_per_100g": 0,
+                "aliases": [raw_name] if raw_name else [canonical],
+                "category": "custom",
+            }
+            merged_food = minimal_food
+            if isinstance(food_data, dict) and food_data:
+                merged_food = {**minimal_food, **food_data}
+                # Ensure the alias is kept.
+                aliases = merged_food.get("aliases")
+                if not isinstance(aliases, list):
+                    aliases = []
+                if raw_name and raw_name not in aliases:
+                    aliases.append(raw_name)
+                if canonical not in aliases:
+                    aliases.append(canonical)
+                merged_food["aliases"] = aliases
+
+            self.upsert_food(canonical, merged_food, source=source)
+            if raw_name and raw_name != canonical:
+                self.upsert_alias(raw_name, canonical, source=source)
+
+        self.set_pending_status(pending_id, "approved")
+        return self.get_pending_food(pending_id)
+
+    def reject_pending_food(self, pending_id: int) -> bool:
+        return self.set_pending_status(pending_id, "rejected")
 
     def upsert_alias(self, alias: str, canonical_name: str, source: str = "deepseek") -> None:
         alias = (alias or "").strip()
