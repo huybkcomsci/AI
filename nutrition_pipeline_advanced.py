@@ -363,25 +363,12 @@ class NutritionPipelineAdvanced:
             except Exception:
                 raw_confidence = 0.6
 
+            # Tên ưu tiên: luôn giữ canonical DeepSeek trả về để tránh đổi sang món khác.
+            matched_name = str(match_target).strip()
+            match_confidence = raw_confidence
             matcher_name, matcher_confidence = self.extractor.matcher.find_food(str(match_target))
             if not matcher_name:
                 matcher_confidence = 0.0
-
-            canonical_in_db = canonical_name in VIETNAMESE_FOODS_NUTRITION
-
-            # Nếu DeepSeek trả món chưa có trong DB, ưu tiên giữ nguyên canonical để tránh map sai (ví dụ "dế chiên bơ" -> "thịt bò").
-            use_matcher = False
-            if canonical_in_db and matcher_name:
-                use_matcher = True
-            elif matcher_name and matcher_confidence >= 0.75 and matcher_name in VIETNAMESE_FOODS_NUTRITION:
-                use_matcher = True
-
-            if use_matcher:
-                matched_name = matcher_name
-                match_confidence = max(matcher_confidence, raw_confidence)
-            else:
-                matched_name = str(match_target).strip()
-                match_confidence = raw_confidence
 
             qty_data = raw.get('quantity') or raw.get('quantity_info') or {}
             amount = qty_data.get('amount') or qty_data.get('value') or 1
