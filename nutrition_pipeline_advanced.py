@@ -416,7 +416,7 @@ class NutritionPipelineAdvanced:
             if matched_name in VIETNAMESE_FOODS_NUTRITION:
                 nutrition = calculate_nutrition(matched_name, weight) or {}
             elif nutrition_hint:
-                nutrition = nutrition_hint
+                nutrition = self._derive_nutrition_from_hint(nutrition_hint, weight)
 
             if no_sugar and isinstance(nutrition, dict):
                 nutrition['sugar'] = 0.0
@@ -456,6 +456,56 @@ class NutritionPipelineAdvanced:
         if "no sugar" in normalized or "sugar free" in normalized or "unsweetened" in normalized:
             return True
         return False
+
+    def _derive_nutrition_from_hint(self, nutrition_hint: Dict[str, Any], weight: float) -> Dict[str, float]:
+        """
+        Convert per-100g/100ml nutrition hints from DeepSeek into absolute values using estimated weight.
+        """
+        if not isinstance(nutrition_hint, dict):
+            return {}
+
+        def pick_float(keys):
+            for key in keys:
+                if key in nutrition_hint:
+                    try:
+                        return float(nutrition_hint.get(key))
+                    except Exception:
+                        continue
+            return None
+
+        per_100g_keys = {
+            "calories": pick_float(["calories_per_100g", "caloriesPer100g"]),
+            "carbs": pick_float(["carbs_per_100g", "carbohydrates_per_100g", "carbsPer100g"]),
+            "sugar": pick_float(["sugar_per_100g", "sugars_per_100g", "sugarPer100g"]),
+            "protein": pick_float(["protein_per_100g", "proteinPer100g"]),
+            "fat": pick_float(["fat_per_100g", "fatPer100g"]),
+            "fiber": pick_float(["fiber_per_100g", "fiberPer100g"]),
+        }
+        per_100ml_keys = {
+            "calories": pick_float(["calories_per_100ml", "caloriesPer100ml"]),
+            "carbs": pick_float(["carbs_per_100ml", "carbohydrates_per_100ml", "carbsPer100ml"]),
+            "sugar": pick_float(["sugar_per_100ml", "sugars_per_100ml", "sugarPer100ml"]),
+            "protein": pick_float(["protein_per_100ml", "proteinPer100ml"]),
+            "fat": pick_float(["fat_per_100ml", "fatPer100ml"]),
+            "fiber": pick_float(["fiber_per_100ml", "fiberPer100ml"]),
+        }
+
+        has_g = any(v is not None for v in per_100g_keys.values())
+        has_ml = any(v is not None for v in per_100ml_keys.values())
+        base = per_100g_keys if has_g or not has_ml else per_100ml_keys
+
+        try:
+            weight_value = float(weight or 0)
+        except Exception:
+            weight_value = 0.0
+        scale = weight_value / 100.0 if weight_value > 0 else 0.0
+
+        result = {}
+        for key, per_100_val in base.items():
+            if per_100_val is None:
+                continue
+            result[key] = per_100_val * scale
+        return result
 
     def _strip_no_sugar(self, text: str) -> str:
         """Remove 'không đường' markers for better food name matching."""
