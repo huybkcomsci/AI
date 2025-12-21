@@ -1,5 +1,6 @@
 import re
 import json
+import time
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
@@ -159,6 +160,9 @@ class NutritionPipelineAdvanced:
             self.confidence_threshold = float(getattr(Config, "MIN_CONFIDENCE_FOR_API", 0.6) or 0.6)
         except Exception:
             self.confidence_threshold = 0.6
+        # Cache ngắn để đảm bảo mỗi input chỉ gọi DeepSeek 1 lần trong cửa sổ TTL
+        self.deepseek_cache_ttl = getattr(Config, "DEEPSEEK_CACHE_TTL_SECONDS", 5)
+        self._deepseek_cache: Dict[str, Any] = {"key": None, "ts": 0.0, "result": None}
     
     def process_input(self, user_input: str) -> Dict[str, Any]:
         """Xử lý input chính"""
@@ -280,6 +284,16 @@ class NutritionPipelineAdvanced:
 
     def _analyze_with_deepseek(self, user_input: str) -> Dict[str, Any]:
         """Gọi DeepSeek và chuẩn hóa kết quả về cấu trúc nội bộ."""
+        cache_key = f"{self.deepseek_client.model}:{user_input.strip()}"
+        now = time.time()
+        if (
+            self._deepseek_cache.get("key") == cache_key
+            and now - float(self._deepseek_cache.get("ts", 0)) <= float(self.deepseek_cache_ttl or 0)
+            and self._deepseek_cache.get("result") is not None
+        ):
+            cached = self._deepseek_cache["result"]
+            return dict(cached)
+
         try:
             ds_raw = self.deepseek_client.analyze(user_input)
             foods = self._normalize_deepseek_foods(ds_raw.get("foods", []))
@@ -309,6 +323,9 @@ class NutritionPipelineAdvanced:
                 "raw_content": "",
                 "error": str(exc)
             }
+        # Cache kết quả (kể cả lỗi) để tránh double-call
+        self._deepseek_cache = {"key": cache_key, "ts": now, "result": dict(result)}
+        return result
 
     def _normalize_deepseek_foods(self, deepseek_foods: List[Dict[str, Any]]) -> List[Dict]:
         """Chuẩn hóa output DeepSeek thành format pipeline."""
