@@ -341,10 +341,30 @@ class NutritionPipelineAdvanced:
             no_sugar = self._detect_no_sugar(surface_text)
             match_target = self._strip_no_sugar(canonical_name if canonical_name else surface_text) if no_sugar else (canonical_name or surface_text)
 
-            matched_name, match_confidence = self.extractor.matcher.find_food(str(match_target))
-            if not matched_name:
+            try:
+                raw_confidence = float(raw.get('confidence', 0.6) or 0.6)
+            except Exception:
+                raw_confidence = 0.6
+
+            matcher_name, matcher_confidence = self.extractor.matcher.find_food(str(match_target))
+            if not matcher_name:
+                matcher_confidence = 0.0
+
+            canonical_in_db = canonical_name in VIETNAMESE_FOODS_NUTRITION
+
+            # Nếu DeepSeek trả món chưa có trong DB, ưu tiên giữ nguyên canonical để tránh map sai (ví dụ "dế chiên bơ" -> "thịt bò").
+            use_matcher = False
+            if canonical_in_db and matcher_name:
+                use_matcher = True
+            elif matcher_name and matcher_confidence >= 0.75 and matcher_name in VIETNAMESE_FOODS_NUTRITION:
+                use_matcher = True
+
+            if use_matcher:
+                matched_name = matcher_name
+                match_confidence = max(matcher_confidence, raw_confidence)
+            else:
                 matched_name = str(match_target).strip()
-                match_confidence = 0.5
+                match_confidence = raw_confidence
 
             qty_data = raw.get('quantity') or raw.get('quantity_info') or {}
             amount = qty_data.get('amount') or qty_data.get('value') or 1
@@ -379,16 +399,6 @@ class NutritionPipelineAdvanced:
                 min(1.0, round(match_confidence * quantity_confidence, 2))
             )
 
-            category = raw.get('category') or VIETNAMESE_FOODS_NUTRITION.get(matched_name, {}).get('category')
-            weight = estimate_weight(quantity_info, category)
-            nutrition = (
-                (calculate_nutrition(matched_name, weight) or {})
-                if matched_name in VIETNAMESE_FOODS_NUTRITION
-                else {}
-            )
-            if no_sugar and isinstance(nutrition, dict):
-                nutrition['sugar'] = 0.0
-
             nutrition_hint = (
                 raw.get('nutrition_hint')
                 or raw.get('nutritionHint')
@@ -399,6 +409,17 @@ class NutritionPipelineAdvanced:
                 or raw.get('nutrition')
             )
             nutrition_hint = nutrition_hint if isinstance(nutrition_hint, dict) else None
+
+            category = raw.get('category') or VIETNAMESE_FOODS_NUTRITION.get(matched_name, {}).get('category') or "custom"
+            weight = estimate_weight(quantity_info, category)
+            nutrition = {}
+            if matched_name in VIETNAMESE_FOODS_NUTRITION:
+                nutrition = calculate_nutrition(matched_name, weight) or {}
+            elif nutrition_hint:
+                nutrition = nutrition_hint
+
+            if no_sugar and isinstance(nutrition, dict):
+                nutrition['sugar'] = 0.0
 
             aliases = raw.get('aliases')
             if not isinstance(aliases, list):
