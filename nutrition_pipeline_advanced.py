@@ -552,6 +552,8 @@ class NutritionPipelineAdvanced:
         if not foods:
             return
 
+        new_food_seen: set = set()
+
         for food in foods:
             canonical = (
                 food.get('canonical_name')
@@ -591,6 +593,31 @@ class NutritionPipelineAdvanced:
                 aliases = VIETNAMESE_FOODS_NUTRITION.get(canonical, {}).get("aliases", [])
                 if isinstance(aliases, list):
                     existing_aliases = [str(a).strip() for a in aliases if a]
+
+            # Nếu là món mới (chưa có trong DB), chỉ thêm 1 bản ghi pending cho canonical để tránh duplicate.
+            if not canonical_in_db:
+                if canonical in new_food_seen:
+                    continue
+                primary_alias = canonical or (alias_candidates[0] if alias_candidates else None)
+                if not primary_alias:
+                    continue
+                merged_nutrition = nutrition_data if isinstance(nutrition_data, dict) else {}
+                if alias_candidates:
+                    # Lưu gợi ý alias vào nutrition_data để admin tham khảo
+                    merged_nutrition = dict(merged_nutrition)
+                    merged_nutrition.setdefault("aliases", alias_candidates)
+
+                self.learning_db.upsert_pending_food(
+                    raw_name=primary_alias,
+                    canonical_name=canonical,
+                    suggested_action="new_food",
+                    confidence=food.get("confidence", match_confidence),
+                    example_input=user_input,
+                    nutrition_data=merged_nutrition,
+                    source="deepseek",
+                )
+                new_food_seen.add(canonical)
+                continue
 
             for alias in alias_candidates:
                 alias_clean = self._strip_no_sugar(alias) if alias else ""
