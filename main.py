@@ -209,6 +209,31 @@ def _run_analyze(
     mapped_foods = to_spec_foods(result.get("foods", []))
     meal_summary = to_meal_summary(result.get("meal_summary", {}))
 
+    confidence_values = []
+    for food in result.get("foods", []):
+        try:
+            confidence_values.append(float(food.get("confidence", 0) or 0))
+        except Exception:
+            continue
+    confidence_meta = None
+    if confidence_values:
+        confidence_meta = {
+            "min": min(confidence_values),
+            "max": max(confidence_values),
+            "avg": sum(confidence_values) / len(confidence_values),
+        }
+
+    deepseek_meta = {
+        "used": bool(result.get("deepseek_used")),
+        "available": bool(result.get("deepseek_available")),
+        "success": bool(result.get("deepseek_success")),
+        "trigger": result.get("deepseek_trigger"),
+        "error": result.get("deepseek_error"),
+        "analysis": result.get("deepseek_analysis"),
+        "suggestions": result.get("deepseek_suggestions") or [],
+        "raw": result.get("deepseek_raw") if result.get("deepseek_success") else None,
+    }
+
     entry = {
         "entryId": entry_id,
         "text": text,
@@ -231,6 +256,9 @@ def _run_analyze(
             "requestId": entry_id,
             "entryId": entry_id,
             "createdAt": entry["createdAt"],
+            "processingMethod": result.get("processing_method"),
+            **({"confidence": confidence_meta} if confidence_meta else {}),
+            "deepseek": deepseek_meta,
         },
     }
 

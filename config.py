@@ -15,7 +15,7 @@ class Config:
     
     # Nutrition calculation
     DEFAULT_CALORIES_PER_100G = 150
-    MIN_CONFIDENCE_FOR_API = 0.7  # Gọi DeepSeek khi độ tin cậy < 70%
+    MIN_CONFIDENCE_FOR_API = 0.6  # Gọi DeepSeek khi độ tin cậy < 60%
     ENABLE_DEEPSEEK = bool(DEEPSEEK_API_KEY)
     
     # API timeout

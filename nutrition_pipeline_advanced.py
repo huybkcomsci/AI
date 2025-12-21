@@ -154,7 +154,11 @@ class NutritionPipelineAdvanced:
             'fat': 0,
             'fiber': 0
         }
-        self.confidence_threshold = getattr(Config, "MIN_CONFIDENCE_FOR_API", 0.7)
+        # Gọi DeepSeek khi độ tin cậy dưới ngưỡng (mặc định 0.6 nếu không cấu hình)
+        try:
+            self.confidence_threshold = float(getattr(Config, "MIN_CONFIDENCE_FOR_API", 0.6) or 0.6)
+        except Exception:
+            self.confidence_threshold = 0.6
     
     def process_input(self, user_input: str) -> Dict[str, Any]:
         """Xử lý input chính"""
@@ -310,17 +314,36 @@ class NutritionPipelineAdvanced:
         """Chuẩn hóa output DeepSeek thành format pipeline."""
         normalized = []
         for raw in deepseek_foods or []:
-            raw_name = raw.get('food_name') or raw.get('name') or raw.get('item')
-            if not raw_name:
+            canonical_name = (
+                raw.get('canonicalName')
+                or raw.get('canonical_name')
+                or raw.get('food_name')
+                or raw.get('name')
+                or raw.get('item')
+            )
+            alias_value = (
+                raw.get('alias')
+                or raw.get('raw_name')
+                or raw.get('rawFoodName')
+                or raw.get('raw_food_name')
+            )
+            raw_original = raw.get('original_text')
+
+            base_label = canonical_name or alias_value or raw_original
+            if not base_label:
                 continue
 
-            raw_name = str(raw_name).strip()
-            no_sugar = self._detect_no_sugar(raw_name)
-            match_name = self._strip_no_sugar(raw_name) if no_sugar else raw_name
-            
-            matched_name, match_confidence = self.extractor.matcher.find_food(str(match_name))
+            raw_label = str(base_label).strip()
+            canonical_name = str(canonical_name).strip() if canonical_name else raw_label
+            alias_value = str(alias_value).strip() if alias_value else raw_label
+            surface_text = str(raw_original).strip() if raw_original else alias_value
+
+            no_sugar = self._detect_no_sugar(surface_text)
+            match_target = self._strip_no_sugar(canonical_name if canonical_name else surface_text) if no_sugar else (canonical_name or surface_text)
+
+            matched_name, match_confidence = self.extractor.matcher.find_food(str(match_target))
             if not matched_name:
-                matched_name = str(match_name).strip()
+                matched_name = str(match_target).strip()
                 match_confidence = 0.5
 
             qty_data = raw.get('quantity') or raw.get('quantity_info') or {}
@@ -356,7 +379,7 @@ class NutritionPipelineAdvanced:
                 min(1.0, round(match_confidence * quantity_confidence, 2))
             )
 
-            category = VIETNAMESE_FOODS_NUTRITION.get(matched_name, {}).get('category')
+            category = raw.get('category') or VIETNAMESE_FOODS_NUTRITION.get(matched_name, {}).get('category')
             weight = estimate_weight(quantity_info, category)
             nutrition = (
                 (calculate_nutrition(matched_name, weight) or {})
@@ -366,17 +389,36 @@ class NutritionPipelineAdvanced:
             if no_sugar and isinstance(nutrition, dict):
                 nutrition['sugar'] = 0.0
 
+            nutrition_hint = (
+                raw.get('nutrition_hint')
+                or raw.get('nutritionHint')
+                or raw.get('nutrition_data')
+                or raw.get('nutritionData')
+                or raw.get('nutrition_guess')
+                or raw.get('nutritionGuess')
+                or raw.get('nutrition')
+            )
+            nutrition_hint = nutrition_hint if isinstance(nutrition_hint, dict) else None
+
+            aliases = raw.get('aliases')
+            if not isinstance(aliases, list):
+                aliases = []
+
             normalized.append({
                 'food_name': matched_name,
-                'original_text': raw.get('original_text', raw_name),
+                'canonical_name': canonical_name,
+                'alias': alias_value,
+                'aliases': aliases,
+                'original_text': surface_text or raw_label,
                 'quantity_info': quantity_info,
                 'estimated_weight_g': weight,
                 'nutrition': nutrition,
                 'category': category,
                 'confidence': combined_confidence,
                 'match_confidence': match_confidence,
-                'raw_food_name': raw_name,
-                'no_sugar': no_sugar
+                'raw_food_name': surface_text,
+                'no_sugar': no_sugar,
+                'pending_nutrition': nutrition_hint
             })
 
         return normalized
@@ -423,40 +465,69 @@ class NutritionPipelineAdvanced:
             return
 
         for food in foods:
-            canonical = (food.get('food_name') or "").strip()
+            canonical = (
+                food.get('canonical_name')
+                or food.get('food_name')
+                or ""
+            )
+            canonical = str(canonical).strip()
             if not canonical:
                 continue
 
-            raw_name = (food.get('raw_food_name') or "").strip()
-            alias = self._strip_no_sugar(raw_name) if raw_name else ""
-            if not alias:
-                alias = canonical
+            alias_candidates: List[str] = []
+            raw_aliases = food.get('aliases') if isinstance(food.get('aliases'), list) else []
+            for candidate in [
+                food.get('alias'),
+                food.get('raw_food_name'),
+                *raw_aliases,
+                canonical,
+            ]:
+                if not candidate:
+                    continue
+                candidate_str = str(candidate).strip()
+                if candidate_str and candidate_str not in alias_candidates:
+                    alias_candidates.append(candidate_str)
 
-            # Only add to pending when the food is unknown (or matched with very low confidence),
-            # to avoid noise when DeepSeek returns a mix of known + unknown foods.
             try:
                 match_confidence = float(food.get("match_confidence", 0) or 0)
             except Exception:
                 match_confidence = 0.0
 
+            nutrition_data = food.get("pending_nutrition")
+            if not isinstance(nutrition_data, dict):
+                nutrition_data = food.get("nutrition")
+
             canonical_in_db = canonical in VIETNAMESE_FOODS_NUTRITION
-            if canonical_in_db and match_confidence >= 0.6:
-                continue
+            existing_aliases: List[str] = []
+            if canonical_in_db:
+                aliases = VIETNAMESE_FOODS_NUTRITION.get(canonical, {}).get("aliases", [])
+                if isinstance(aliases, list):
+                    existing_aliases = [str(a).strip() for a in aliases if a]
 
-            suggested_action = "new_food"
-            candidate_name = alias.strip()
-            if not candidate_name:
-                continue
+            for alias in alias_candidates:
+                alias_clean = self._strip_no_sugar(alias) if alias else ""
+                alias_clean = alias_clean.strip() if alias_clean else alias.strip()
+                if not alias_clean:
+                    continue
 
-            self.learning_db.upsert_pending_food(
-                raw_name=candidate_name,
-                canonical_name=candidate_name,
-                suggested_action=suggested_action,
-                confidence=food.get("confidence"),
-                example_input=user_input,
-                nutrition_data=food.get("nutrition"),
-                source="deepseek",
-            )
+                if canonical_in_db:
+                    if alias_clean == canonical:
+                        continue
+                    if alias_clean in existing_aliases:
+                        continue
+                    suggested_action = "alias"
+                else:
+                    suggested_action = "new_food"
+
+                self.learning_db.upsert_pending_food(
+                    raw_name=alias_clean,
+                    canonical_name=canonical,
+                    suggested_action=suggested_action,
+                    confidence=food.get("confidence", match_confidence),
+                    example_input=user_input,
+                    nutrition_data=nutrition_data,
+                    source="deepseek",
+                )
     
     def _check_if_update(self, analyzed_foods: List[Dict]) -> bool:
         """Kiểm tra xem có phải là cập nhật số lượng không"""
