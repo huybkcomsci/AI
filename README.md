@@ -39,6 +39,18 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
   ```
   Trả: `{ success, data: { foods[], mealSummary }, meta: { patientId, requestId(entryId), createdAt } }`.
 
+- `POST /analyze-with-date` — tương tự `/analyze` nhưng trường ngày là `date` để lưu cho bất kỳ ngày nào (kể cả ngày quá khứ).
+  ```json
+  {
+    "patientId": "patient_001",
+    "userId": "mobile",
+    "text": "ăn 2 ổ bánh mì",
+    "date": "2025-12-10",
+    "locale": "vi-VN"
+  }
+  ```
+  Trả: cùng format với `/analyze`.
+
 - `POST /update-quantity` — chỉnh khẩu phần/đơn vị món (tìm món theo tên trong ngày).
   ```json
   {

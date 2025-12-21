@@ -44,6 +44,14 @@ class AnalyzeRequest(BaseModel):
     locale: Optional[str] = "vi-VN"
 
 
+class AnalyzeWithDateRequest(BaseModel):
+    patientId: str = Field(..., description="Unique patient id")
+    userId: Optional[str] = "default"
+    text: str
+    date: str = Field(..., description="YYYY-MM-DD date to save this entry")
+    locale: Optional[str] = "vi-VN"
+
+
 class UpdateQuantityRequest(BaseModel):
     patientId: str
     userId: Optional[str] = "default"
@@ -183,6 +191,50 @@ def get_entry_by_id(log: Dict[str, Any], entry_id: str) -> Optional[Dict[str, An
     return None
 
 
+def _run_analyze(
+    patient_id: str,
+    user_id: Optional[str],
+    text: str,
+    date_key: str,
+    locale: Optional[str],
+) -> Dict[str, Any]:
+    """Shared analyze handler so different endpoints can save to a specific date."""
+    if not patient_id:
+        return error_response("VALIDATION_ERROR", "patientId is required")
+    if not date_key:
+        return error_response("VALIDATION_ERROR", "dateKey is required")
+
+    result = pipeline.process_input(text)
+    entry_id = str(int(datetime.utcnow().timestamp() * 1000))
+    mapped_foods = to_spec_foods(result.get("foods", []))
+    meal_summary = to_meal_summary(result.get("meal_summary", {}))
+
+    entry = {
+        "entryId": entry_id,
+        "text": text,
+        "userId": user_id,
+        "foods": mapped_foods,
+        "mealSummary": meal_summary,
+        "createdAt": now_utc(),
+        "status": "draft",
+    }
+    daily_log_db.append_entry(patient_id, date_key, entry)
+
+    return {
+        "success": True,
+        "data": {
+            "foods": mapped_foods,
+            "mealSummary": meal_summary,
+        },
+        "meta": {
+            "patientId": patient_id,
+            "requestId": entry_id,
+            "entryId": entry_id,
+            "createdAt": entry["createdAt"],
+        },
+    }
+
+
 # ----------------------------
 # Routes
 # ----------------------------
@@ -193,40 +245,24 @@ def health():
 
 @app.post("/analyze")
 async def analyze(request: AnalyzeRequest):
-    if not request.patientId:
-        return error_response("VALIDATION_ERROR", "patientId is required")
-    if not request.dateKey:
-        return error_response("VALIDATION_ERROR", "dateKey is required")
+    return _run_analyze(
+        request.patientId,
+        request.userId,
+        request.text,
+        request.dateKey,
+        request.locale,
+    )
 
-    result = pipeline.process_input(request.text)
-    entry_id = str(int(datetime.utcnow().timestamp() * 1000))
-    mapped_foods = to_spec_foods(result.get("foods", []))
-    meal_summary = to_meal_summary(result.get("meal_summary", {}))
 
-    entry = {
-        "entryId": entry_id,
-        "text": request.text,
-        "userId": request.userId,
-        "foods": mapped_foods,
-        "mealSummary": meal_summary,
-        "createdAt": now_utc(),
-        "status": "draft",
-    }
-    daily_log_db.append_entry(request.patientId, request.dateKey, entry)
-
-    return {
-        "success": True,
-        "data": {
-            "foods": mapped_foods,
-            "mealSummary": meal_summary,
-        },
-        "meta": {
-            "patientId": request.patientId,
-            "requestId": entry_id,
-            "entryId": entry_id,
-            "createdAt": entry["createdAt"],
-        },
-    }
+@app.post("/analyze-with-date")
+async def analyze_with_date(request: AnalyzeWithDateRequest):
+    return _run_analyze(
+        request.patientId,
+        request.userId,
+        request.text,
+        request.date,
+        request.locale,
+    )
 
 
 @app.post("/update-quantity")
