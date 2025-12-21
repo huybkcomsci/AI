@@ -688,9 +688,14 @@ class NutritionPipelineAdvanced:
         foods = result['foods']
         meal_summary = result['meal_summary']
         memory_summary = result['memory_summary']
+
+        zero_nutrition = all(
+            float(meal_summary.get(key, 0) or 0) == 0
+            for key in ["calories", "carbs", "sugar", "protein", "fat", "fiber"]
+        )
         
-        if not foods:
-            base_msg = "🤔 Tôi không nhận diện được món ăn nào. Bạn có thể thử nhập:\n- '2 bát cơm với thịt kho'\n- '1 tô phở bò'\n- '200g cá chiên và canh rau'"
+        if not foods or zero_nutrition:
+            base_msg = "🤔 Tôi không nhận diện được món ăn nào hợp lệ (dinh dưỡng = 0). Bạn có thể thử nhập:\n- '2 bát cơm với thịt kho'\n- '1 tô phở bò'\n- '200g cá chiên và canh rau'"
             if result.get('deepseek_used'):
                 ds_error = result.get('deepseek_error') or "DeepSeek không trả về kết quả"
                 base_msg += f"\n(Đã thử DeepSeek: {ds_error})"
