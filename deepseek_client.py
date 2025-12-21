@@ -1,5 +1,6 @@
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -50,6 +51,9 @@ class DeepSeekClient:
         self.temperature = Config.TEMPERATURE
         self.max_tokens = Config.MAX_TOKENS
         self.timeout = Config.REQUEST_TIMEOUT
+        # Cache ngắn để tránh gọi DeepSeek 2 lần cho cùng input trong cùng phiên/request
+        self._cache_ttl = getattr(Config, "DEEPSEEK_CACHE_TTL_SECONDS", 5)
+        self._last_cache: Dict[str, Any] = {"key": None, "ts": 0.0, "response": None}
 
     def is_available(self) -> bool:
         return bool(self.api_key)
@@ -81,6 +85,17 @@ class DeepSeekClient:
             "Content-Type": "application/json",
         }
 
+        # Dedupe: nếu cùng input được gọi lại trong thời gian ngắn, dùng cache để tránh double-call
+        cache_key = f"{self.model}:{user_input.strip()}"
+        now = time.time()
+        if (
+            self._last_cache.get("key") == cache_key
+            and now - float(self._last_cache.get("ts", 0)) <= float(self._cache_ttl or 0)
+            and self._last_cache.get("response") is not None
+        ):
+            cached = self._last_cache["response"]
+            return dict(cached)
+
         try:
             response = requests.post(
                 f"{self.base_url}/chat/completions",
@@ -90,7 +105,7 @@ class DeepSeekClient:
             )
             response.raise_for_status()
         except Exception as exc:  # pragma: no cover - network errors are runtime issues
-            return {
+            result = {
                 "success": False,
                 "error": str(exc),
                 "foods": [],
@@ -98,6 +113,8 @@ class DeepSeekClient:
                 "suggestions": [],
                 "raw_content": "",
             }
+            self._last_cache = {"key": cache_key, "ts": now, "response": result}
+            return result
 
         data = response.json()
         content = (
@@ -108,7 +125,7 @@ class DeepSeekClient:
 
         parsed = self._extract_json(content)
 
-        return {
+        result = {
             "success": parsed is not None,
             "error": None if parsed is not None else "Cannot parse DeepSeek JSON response",
             "foods": parsed.get("foods", []) if parsed else [],
@@ -116,6 +133,8 @@ class DeepSeekClient:
             "suggestions": parsed.get("suggestions", []) if parsed else [],
             "raw_content": content,
         }
+        self._last_cache = {"key": cache_key, "ts": now, "response": result}
+        return result
 
     def _extract_json(self, content: str) -> Optional[Dict[str, Any]]:
         """Tìm và parse JSON trong nội dung trả về."""
