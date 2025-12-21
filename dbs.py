@@ -362,6 +362,7 @@ class FoodLearningDB:
                     suggested_action TEXT NOT NULL,
                     confidence REAL,
                     example_input TEXT,
+                    nutrition_data TEXT,
                     source TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
@@ -395,6 +396,23 @@ class FoodLearningDB:
             )
             conn.commit()
 
+        # Backward-compatible column additions.
+        self._add_column_if_missing(
+            table="pending_foods",
+            column="nutrition_data",
+            column_def="nutrition_data TEXT",
+        )
+
+    def _add_column_if_missing(self, table: str, column: str, column_def: str) -> None:
+        """Add a column to a table if it does not exist (SQLite)."""
+        with self._connect() as conn:
+            cursor = conn.execute(f"PRAGMA table_info({table})")
+            existing = {row[1] for row in cursor.fetchall()}
+            if column in existing:
+                return
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")
+            conn.commit()
+
     def upsert_pending_food(
         self,
         raw_name: str,
@@ -402,6 +420,7 @@ class FoodLearningDB:
         suggested_action: str,
         confidence: Optional[float] = None,
         example_input: Optional[str] = None,
+        nutrition_data: Optional[Dict[str, Any]] = None,
         source: str = "deepseek",
     ) -> None:
         raw_name = (raw_name or "").strip()
@@ -425,16 +444,17 @@ class FoodLearningDB:
                 return None
 
         confidence_value = coerce_conf(confidence)
+        nutrition_json = json.dumps(nutrition_data, ensure_ascii=False) if nutrition_data else None
 
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO pending_foods (
                     raw_name, canonical_name, suggested_action,
-                    confidence, example_input, source,
+                    confidence, example_input, nutrition_data, source,
                     status, created_at, updated_at, seen_count
                 )
-                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
                 ON CONFLICT(raw_name, canonical_name) DO UPDATE SET
                     suggested_action = excluded.suggested_action,
                     confidence = CASE
@@ -443,6 +463,7 @@ class FoodLearningDB:
                         ELSE MAX(pending_foods.confidence, excluded.confidence)
                     END,
                     example_input = COALESCE(excluded.example_input, pending_foods.example_input),
+                    nutrition_data = COALESCE(excluded.nutrition_data, pending_foods.nutrition_data),
                     source = excluded.source,
                     updated_at = excluded.updated_at,
                     seen_count = pending_foods.seen_count + 1,
@@ -457,6 +478,7 @@ class FoodLearningDB:
                     suggested_action,
                     confidence_value,
                     example_input,
+                    nutrition_json,
                     source,
                     now,
                     now,
@@ -486,7 +508,7 @@ class FoodLearningDB:
         sql = """
             SELECT
                 id, raw_name, canonical_name, suggested_action,
-                confidence, example_input, source,
+                confidence, example_input, nutrition_data, source,
                 status, created_at, updated_at, seen_count
             FROM pending_foods
             WHERE status = ?
@@ -518,12 +540,17 @@ class FoodLearningDB:
                 suggested_action,
                 confidence_value,
                 example_input,
+                nutrition_json,
                 source,
                 row_status,
                 created_at,
                 updated_at,
                 seen_count,
             ) = row
+            try:
+                nutrition_dict = json.loads(nutrition_json) if nutrition_json else None
+            except json.JSONDecodeError:
+                nutrition_dict = None
             result.append(
                 {
                     "id": row_id,
@@ -532,6 +559,7 @@ class FoodLearningDB:
                     "suggestedAction": suggested_action,
                     "confidence": confidence_value,
                     "exampleInput": example_input,
+                    "nutrition": nutrition_dict,
                     "source": source,
                     "status": row_status,
                     "createdAt": created_at,
@@ -552,7 +580,7 @@ class FoodLearningDB:
                 """
                 SELECT
                     id, raw_name, canonical_name, suggested_action,
-                    confidence, example_input, source,
+                    confidence, example_input, nutrition_data, source,
                     status, created_at, updated_at, seen_count
                 FROM pending_foods
                 WHERE id = ?
@@ -571,12 +599,17 @@ class FoodLearningDB:
             suggested_action,
             confidence_value,
             example_input,
+            nutrition_json,
             source,
             row_status,
             created_at,
             updated_at,
             seen_count,
         ) = row
+        try:
+            nutrition_dict = json.loads(nutrition_json) if nutrition_json else None
+        except json.JSONDecodeError:
+            nutrition_dict = None
         return {
             "id": row_id,
             "rawName": raw_name,
@@ -584,6 +617,7 @@ class FoodLearningDB:
             "suggestedAction": suggested_action,
             "confidence": confidence_value,
             "exampleInput": example_input,
+            "nutrition": nutrition_dict,
             "source": source,
             "status": row_status,
             "createdAt": created_at,

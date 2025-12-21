@@ -454,6 +454,7 @@ class NutritionPipelineAdvanced:
                 suggested_action=suggested_action,
                 confidence=food.get("confidence"),
                 example_input=user_input,
+                nutrition_data=food.get("nutrition"),
                 source="deepseek",
             )
     

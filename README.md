@@ -111,6 +111,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 > Chưa có auth, bạn nên đặt phía sau gateway/VPN nếu dùng thật.
 
 - `GET /admin/pending-foods?status=pending&action=alias&q=&limit=&offset=` — xem bảng tạm món/alias chờ duyệt.
+  - Bản ghi pending lưu cả `nutrition` (macro theo khẩu phần DeepSeek trả về) để admin tham khảo khi duyệt.
 
 - `POST /admin/review-pending-food` — duyệt/loại món từ bảng tạm.
   ```json
