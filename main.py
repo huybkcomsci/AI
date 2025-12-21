@@ -596,7 +596,8 @@ async def admin_review_pending_food(request: ReviewPendingFoodRequest):
         updated = pipeline.learning_db.get_pending_food(request.pendingId)
         return {"success": True, "data": {"pending": updated}}
 
-    action = (request.action or pending.get("suggestedAction") or "").strip().lower()
+    # Mặc định luôn coi là new_food nếu client không chỉ định.
+    action = (request.action or "new_food").strip().lower()
     if action and action not in {"alias", "new_food"}:
         return error_response("VALIDATION_ERROR", "action must be alias|new_food")
 
