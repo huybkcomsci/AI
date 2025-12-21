@@ -99,6 +99,43 @@ class ReviewPendingFoodRequest(BaseModel):
     action: Optional[str] = Field(None, description="alias|new_food")
     foodData: Optional[Dict[str, Any]] = None
 
+    class Config:
+        json_schema_extra = {
+            "examples": [
+                {
+                    "summary": "Approve alias (recommended when canonical already exists)",
+                    "value": {
+                        "pendingId": 1,
+                        "decision": "approve",
+                        "action": "alias",
+                        "canonicalName": "Bánh mì",
+                    },
+                },
+                {
+                    "summary": "Approve new food (custom nutrition)",
+                    "value": {
+                        "pendingId": 2,
+                        "decision": "approve",
+                        "action": "new_food",
+                        "canonicalName": "Dế chiên bơ",
+                        "foodData": {
+                            "category": "custom",
+                            "calories_per_100g": 150,
+                            "carbs_per_100g": 5,
+                            "sugar_per_100g": 0,
+                            "protein_per_100g": 20,
+                            "fat_per_100g": 8,
+                            "fiber_per_100g": 2,
+                        },
+                    },
+                },
+                {
+                    "summary": "Reject pending item",
+                    "value": {"pendingId": 3, "decision": "reject"},
+                },
+            ]
+        }
+
 
 # ----------------------------
 # Helpers
