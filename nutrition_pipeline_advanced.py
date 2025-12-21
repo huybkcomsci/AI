@@ -276,7 +276,15 @@ class NutritionPipelineAdvanced:
         if not extracted_foods or not analyzed_foods:
             return True, "no_foods_detected"
 
-        confidences = [food.get('confidence', 0) for food in analyzed_foods]
+        # Dùng độ tin cậy match (không nhân với quantity để tránh tụt quá thấp)
+        confidences: List[float] = []
+        for food in analyzed_foods:
+            try:
+                conf = float(food.get('match_confidence', food.get('confidence', 0)) or 0)
+            except Exception:
+                conf = 0.0
+            confidences.append(conf)
+
         if confidences and min(confidences) < self.confidence_threshold:
             return True, "low_confidence"
 
