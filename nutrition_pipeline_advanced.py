@@ -1,12 +1,13 @@
 import re
 import json
 import time
+import sqlite3
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from collections import deque
 from config import Config
 from deepseek_client import DeepSeekClient
-from dbs import FoodLearningDB
+from dbs import FoodLearningDB, DB_PATH
 
 # Import các class và functions từ chính module này
 try:
@@ -155,6 +156,10 @@ class NutritionPipelineAdvanced:
             'fat': 0,
             'fiber': 0
         }
+        # Lưu/persist tổng ngày để không mất khi restart
+        self.daily_date = datetime.now().date().isoformat()
+        self._ensure_daily_totals_table()
+        self._load_daily_totals_for_today()
         # Gọi DeepSeek khi độ tin cậy dưới ngưỡng (mặc định 0.6 nếu không cấu hình)
         try:
             self.confidence_threshold = float(getattr(Config, "MIN_CONFIDENCE_FOR_API", 0.6) or 0.6)
@@ -680,8 +685,10 @@ class NutritionPipelineAdvanced:
     
     def _update_daily_totals(self, meal_summary: Dict):
         """Cập nhật tổng ngày"""
+        self._rollover_daily_date_if_needed()
         for key in self.daily_totals:
             self.daily_totals[key] += meal_summary.get(key, 0)
+        self._persist_daily_totals()
     
     def _generate_response(self, result: Dict) -> str:
         """Tạo phản hồi thông minh"""
@@ -771,6 +778,8 @@ class NutritionPipelineAdvanced:
     def reset_daily(self):
         """Reset tổng ngày"""
         self.daily_totals = {k: 0 for k in self.daily_totals}
+        self.daily_date = datetime.now().date().isoformat()
+        self._persist_daily_totals()
     
     def clear_memory(self):
         """Xóa bộ nhớ"""
@@ -783,3 +792,94 @@ class NutritionPipelineAdvanced:
             'memory_summary': self.memory.get_summary(),
             'recent_foods': self.memory.get_recent_foods(5)
         }
+
+    # ----------------------------
+    # Persistence: daily totals
+    # ----------------------------
+    def _ensure_daily_totals_table(self) -> None:
+        """Create lightweight table để lưu tổng ngày của pipeline."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS daily_totals_state (
+                        day TEXT PRIMARY KEY,
+                        totals TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.commit()
+        except Exception:
+            # Không chặn pipeline nếu không lưu được
+            pass
+
+    def _load_daily_totals_for_today(self) -> None:
+        """Load tổng ngày theo date hiện tại nếu có trong DB."""
+        today = datetime.now().date().isoformat()
+        self.daily_date = today
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.execute(
+                    "SELECT totals FROM daily_totals_state WHERE day = ?", (today,)
+                )
+                row = cur.fetchone()
+        except Exception:
+            row = None
+
+        if row:
+            try:
+                stored = json.loads(row[0]) if row[0] else {}
+            except Exception:
+                stored = {}
+            if isinstance(stored, dict):
+                merged = {k: float(stored.get(k, 0) or 0) for k in self.daily_totals}
+                self.daily_totals.update(merged)
+
+    def _persist_daily_totals(self) -> None:
+        """Upsert tổng ngày hiện tại vào DB."""
+        try:
+            payload = json.dumps(self.daily_totals, ensure_ascii=False)
+            now = datetime.utcnow().isoformat() + "Z"
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO daily_totals_state (day, totals, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(day) DO UPDATE SET
+                        totals = excluded.totals,
+                        updated_at = excluded.updated_at
+                    """,
+                    (self.daily_date, payload, now),
+                )
+                conn.commit()
+        except Exception:
+            # Không chặn pipeline nếu không lưu được
+            pass
+
+    def _rollover_daily_date_if_needed(self) -> None:
+        """Reset hoặc load tổng ngày khi bước sang ngày mới."""
+        today = datetime.now().date().isoformat()
+        if today == self.daily_date:
+            return
+        self.daily_date = today
+        # Thử load tổng đã lưu của ngày mới; nếu chưa có thì reset về 0
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cur = conn.execute(
+                    "SELECT totals FROM daily_totals_state WHERE day = ?", (today,)
+                )
+                row = cur.fetchone()
+        except Exception:
+            row = None
+
+        if row:
+            try:
+                stored = json.loads(row[0]) if row[0] else {}
+            except Exception:
+                stored = {}
+            if isinstance(stored, dict):
+                self.daily_totals = {k: float(stored.get(k, 0) or 0) for k in self.daily_totals}
+                return
+        self.daily_totals = {k: 0 for k in self.daily_totals}
+        self._persist_daily_totals()
