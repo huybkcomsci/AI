@@ -15,7 +15,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 ## serverAI (match PDF lab → metrics)
 - Mục đích: Nhận JSON metrics (từ API gốc) + PDF xét nghiệm, trả `matches[]` và `records_template[]` để client POST ngược về `/api/health-metrics/{patientId}/{metricId}/values`.
-- Chạy:
+- Chạy local riêng:
   ```bash
   cd /Users/hus/WORKSPACE/Python/datn
   uvicorn server_ai:app --host 0.0.0.0 --port 8000 --reload
@@ -27,6 +27,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     -F 'metrics_json={"success":true,"data":[{"metric_id":6,"name":"HbA1c","unit":"%"}]}' \
     -F 'pdf=@DIAG.pdf;type=application/pdf'
   ```
+- Đã include thẳng vào `main.py` nên khi deploy 1 service (Render/Heroku...) với start `uvicorn main:app --host 0.0.0.0 --port $PORT`, endpoint `/match` sẵn có trong cùng API (docs sẽ hiển thị nhóm `serverAI`). Chỉ cần set `DEEPSEEK_API_KEY`.
 
 ## Biến môi trường
 - `DEEPSEEK_API_KEY` (tùy chọn) và `DEEPSEEK_BASE_URL` nếu cần. Không có key vẫn chạy local; DeepSeek chỉ bật khi key tồn tại và độ tin cậy thấp.

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from nutrition_pipeline_advanced import NutritionPipelineAdvanced
 from dbs import DailyLogDB, DEFAULT_TOTALS
+from server_ai import router as server_ai_router
 from vietnamese_foods_extended import (
     UNIT_CONVERSION,
     VIETNAMESE_FOODS_NUTRITION,
@@ -31,6 +32,7 @@ app.add_middleware(
 
 pipeline = NutritionPipelineAdvanced()
 daily_log_db = DailyLogDB()
+app.include_router(server_ai_router)
 
 
 # ----------------------------

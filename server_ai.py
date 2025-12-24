@@ -24,7 +24,7 @@ import io
 import json
 from typing import Any, Dict, List
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import APIRouter, FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
 from config import Config
@@ -177,22 +177,15 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
     return json.loads(content)
 
 
-# -----------------------------
-# FastAPI app
-# -----------------------------
-app = FastAPI(
-    title="serverAI",
-    description="Parse PDF + match to patient-specific metrics, returning payload templates to POST back to origin system.",
-    version="1.0.0",
-)
+router = APIRouter(tags=["serverAI"])
 
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"ok": True}
 
 
-@app.post("/match")
+@router.post("/match")
 async def match_metrics(
     metrics_json: str = Form(..., description="Raw JSON string from GET /api/health-metrics/{patientId}"),
     pdf: UploadFile = File(..., description="PDF lab report"),
@@ -249,4 +242,19 @@ async def match_metrics(
     )
 
 
-__all__ = ["app"]
+def create_server_ai_app() -> FastAPI:
+    app = FastAPI(
+        title="serverAI",
+        description=(
+            "Parse PDF + match to patient-specific metrics, returning payload templates to POST back to origin system."
+        ),
+        version="1.0.0",
+    )
+    app.include_router(router)
+    return app
+
+
+app = create_server_ai_app()
+
+
+__all__ = ["app", "router", "create_server_ai_app"]
