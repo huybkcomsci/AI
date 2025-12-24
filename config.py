@@ -19,7 +19,7 @@ class Config:
     ENABLE_DEEPSEEK = bool(DEEPSEEK_API_KEY)
     
     # API timeout
-    REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "60"))
+    REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "600"))
     
     @classmethod
     def is_deepseek_available(cls):
