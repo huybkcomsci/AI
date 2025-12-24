@@ -28,9 +28,11 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     -F 'pdf=@DIAG.pdf;type=application/pdf'
   ```
 - Đã include thẳng vào `main.py` nên khi deploy 1 service (Render/Heroku...) với start `uvicorn main:app --host 0.0.0.0 --port $PORT`, endpoint `/match` sẵn có trong cùng API (docs sẽ hiển thị nhóm `serverAI`). Chỉ cần set `DEEPSEEK_API_KEY`.
+- Render khuyến nghị dùng gunicorn: có sẵn `Procfile` -> `web: gunicorn -k uvicorn.workers.UvicornWorker -w 2 -t 120 main:app` (timeout 120s cho tác vụ PDF+LLM). Đặt start command = `Procfile` hoặc copy y hệt vào Render.
 
 ## Biến môi trường
 - `DEEPSEEK_API_KEY` (tùy chọn) và `DEEPSEEK_BASE_URL` nếu cần. Không có key vẫn chạy local; DeepSeek chỉ bật khi key tồn tại và độ tin cậy thấp.
+- `REQUEST_TIMEOUT_SECONDS` (tùy chọn, default 60) để chỉnh timeout khi gọi DeepSeek.
 
 ## Lưu trữ
 - SQLite file: `nutrition.db` tự tạo tại thư mục dự án.

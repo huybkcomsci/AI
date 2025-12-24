@@ -84,7 +84,7 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
     api_key = Config.DEEPSEEK_API_KEY or None
     base_url = Config.DEEPSEEK_BASE_URL.rstrip("/") if hasattr(Config, "DEEPSEEK_BASE_URL") else ""
     model = getattr(Config, "MODEL", "deepseek-chat")
-    timeout = getattr(Config, "REQUEST_TIMEOUT", 30)
+    timeout = getattr(Config, "REQUEST_TIMEOUT", 60)
     if not api_key:
         raise RuntimeError("Missing DEEPSEEK_API_KEY env var.")
 
