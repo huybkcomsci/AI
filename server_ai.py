@@ -34,6 +34,10 @@ from config import Config
 # -----------------------------
 # Core helpers
 # -----------------------------
+def log(msg: str) -> None:
+    print(f"[serverAI] {msg}", flush=True)
+
+
 def build_A(api_json: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = api_json.get("data", [])
     return [
@@ -219,6 +223,8 @@ async def match_metrics(
     if not pdf_bytes:
         raise HTTPException(status_code=400, detail="Empty PDF file.")
 
+    log(f"Received metrics_json length={len(metrics_json)}, metrics_count={len(A)}, pdf_size={len(pdf_bytes)} bytes")
+
     try:
         pdf_text = pdf_bytes_to_text(pdf_bytes)
     except Exception as exc:
@@ -233,6 +239,7 @@ async def match_metrics(
     try:
         result = deepseek_one_shot(A, pdf_text)
     except Exception as exc:
+        log(f"DeepSeek error: {exc}")
         raise HTTPException(status_code=500, detail=f"DeepSeek call failed: {exc}")
 
     matches = result.get("matches", []) or []
