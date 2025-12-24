@@ -13,6 +13,21 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 - Swagger: http://localhost:8000/docs  
 - Thiết bị thật/Expo: dùng IP LAN (Android emulator: http://10.0.2.2:8000).
 
+## serverAI (match PDF lab → metrics)
+- Mục đích: Nhận JSON metrics (từ API gốc) + PDF xét nghiệm, trả `matches[]` và `records_template[]` để client POST ngược về `/api/health-metrics/{patientId}/{metricId}/values`.
+- Chạy:
+  ```bash
+  cd /Users/hus/WORKSPACE/Python/datn
+  uvicorn server_ai:app --host 0.0.0.0 --port 8000 --reload
+  ```
+  (đổi port nếu đang chạy `main.py`).
+- Gọi thử:
+  ```bash
+  curl -X POST "http://localhost:8000/match" \
+    -F 'metrics_json={"success":true,"data":[{"metric_id":6,"name":"HbA1c","unit":"%"}]}' \
+    -F 'pdf=@DIAG.pdf;type=application/pdf'
+  ```
+
 ## Biến môi trường
 - `DEEPSEEK_API_KEY` (tùy chọn) và `DEEPSEEK_BASE_URL` nếu cần. Không có key vẫn chạy local; DeepSeek chỉ bật khi key tồn tại và độ tin cậy thấp.
 
