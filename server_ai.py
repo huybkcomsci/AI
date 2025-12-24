@@ -1,27 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-FastAPI "serverAI" (stateless):
-- Client gửi: metrics JSON (GET /api/health-metrics/{patientId} response) + file PDF
-- ServerAI trả về:
-  - matches[]
-  - records_template[]  (đủ để client POST lại hệ thống gốc)
-    => mỗi record có metricId, body {value, time}, confidence, warning...
-- Client tự gắn patientId khi gọi API gốc:
-    POST /api/health-metrics/{patientId}/{metricId}/values
-
-Run:
-  export DEEPSEEK_API_KEY="sk-..."
-  uvicorn server_ai:app --host 0.0.0.0 --port 8000 --reload
-
-Test:
-  curl -X POST "http://localhost:8000/match" \
-    -F 'metrics_json={"success":true,"data":[{"metric_id":6,"name":"HbA1c","unit":"%"}]}' \
-    -F 'pdf=@DIAG.pdf;type=application/pdf'
-"""
 
 import io
 import json
+import time
+import os
 from typing import Any, Dict, List
 
 import requests
@@ -29,6 +12,16 @@ from fastapi import APIRouter, FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
 from config import Config
+
+
+# -----------------------------
+# Tunables (env override)
+# -----------------------------
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "5"))          # chỉ lấy tối đa N trang
+MAX_PDF_TEXT_CHARS = int(os.getenv("MAX_PDF_TEXT_CHARS", "35000"))  # cắt text trước khi gửi LLM
+CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "10"))
+READ_TIMEOUT = float(os.getenv("READ_TIMEOUT", "120"))       # DeepSeek thường lâu -> tăng
+MIN_CONFIDENCE_TO_RECORD = float(os.getenv("MIN_CONFIDENCE_TO_RECORD", "0.75"))
 
 
 # -----------------------------
@@ -40,51 +33,66 @@ def log(msg: str) -> None:
 
 def build_A(api_json: Dict[str, Any]) -> List[Dict[str, Any]]:
     data = api_json.get("data", [])
-    return [
-        {"metric_id": m.get("metric_id"), "name": m.get("name"), "unit": m.get("unit")}
-        for m in data
-    ]
+    return [{"metric_id": m.get("metric_id"), "name": m.get("name"), "unit": m.get("unit")} for m in data]
+
+
+def _normalize_text(s: str) -> str:
+    # nhẹ nhàng: loại bớt khoảng trắng thừa (giảm token)
+    s = s.replace("\r", "\n")
+    while "\n\n\n" in s:
+        s = s.replace("\n\n\n", "\n\n")
+    return s.strip()
 
 
 def pdf_bytes_to_text(pdf_bytes: bytes) -> str:
-    """Extract text from PDF bytes; prefer pdfplumber for layout preservation."""
-    try:
-        import pdfplumber  # type: ignore
-
-        chunks: List[str] = []
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                if text.strip():
-                    chunks.append(text)
-        output = "\n\n".join(chunks).strip()
-        if output:
-            return output
-    except Exception:
-        pass
-
+    """
+    Extract text from PDF bytes, page-limited, memory-safe:
+    - Try PyPDF2 first (lighter)
+    - Fallback pdfplumber if needed
+    """
+    # 1) Try PyPDF2 first
     try:
         from PyPDF2 import PdfReader  # type: ignore
 
         reader = PdfReader(io.BytesIO(pdf_bytes))
         chunks: List[str] = []
-        for page in reader.pages:
+        pages = reader.pages[:MAX_PDF_PAGES]
+        for page in pages:
             text = page.extract_text() or ""
             if text.strip():
                 chunks.append(text)
-        return "\n\n".join(chunks).strip()
+
+        out = "\n\n".join(chunks).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+
+    # 2) Fallback: pdfplumber (nặng hơn)
+    try:
+        import pdfplumber  # type: ignore
+
+        chunks = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages[:MAX_PDF_PAGES]):
+                text = page.extract_text() or ""
+                if text.strip():
+                    chunks.append(text)
+
+        out = "\n\n".join(chunks).strip()
+        return out
     except Exception as exc:
-        raise RuntimeError(
-            "Cannot extract text from PDF. The PDF may be scanned image; OCR is needed."
-        ) from exc
+        raise RuntimeError("Cannot extract text from PDF (maybe scanned image). OCR needed.") from exc
 
 
 def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
-    """Call DeepSeek via HTTP; avoid OpenAI SDK quirks on managed hosts."""
-    api_key = Config.DEEPSEEK_API_KEY or None
-    base_url = Config.DEEPSEEK_BASE_URL.rstrip("/") if hasattr(Config, "DEEPSEEK_BASE_URL") else ""
+    """
+    Call DeepSeek via HTTP. Output includes records_template ready for origin API.
+    """
+    api_key = getattr(Config, "DEEPSEEK_API_KEY", None) or None
+    base_url = getattr(Config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
     model = getattr(Config, "MODEL", "deepseek-chat")
-    timeout = getattr(Config, "REQUEST_TIMEOUT", 60)
+
     if not api_key:
         raise RuntimeError("Missing DEEPSEEK_API_KEY env var.")
 
@@ -105,7 +113,7 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
             "metric_id differs per patient; match by meaning/semantics, not by id.",
             "Extract lab_items first (test_name/value/unit, alt_values if both units appear).",
             "Then produce matches for each item in A.",
-            "Create records_template ONLY for matches with matched=true and confidence>=0.75.",
+            f"Create records_template ONLY for matches with matched=true and confidence>={MIN_CONFIDENCE_TO_RECORD}.",
             "records_template must be sufficient for client to call: POST /api/health-metrics/{patientId}/{metricId}/values (client provides patientId).",
             "Set record.body.value to normalized_value_in_api_unit if available; else use raw file_value only if file_unit matches api_unit (or api_unit is null).",
             "Set record.body.time ONLY if explicitly present in the PDF; otherwise set null (do NOT guess).",
@@ -171,30 +179,29 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
         ],
     }
 
-    try:
-        resp = requests.post(
-            f"{base_url or 'https://api.deepseek.com'}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        raise RuntimeError(f"DeepSeek HTTP call failed: {exc}") from exc
+    url = f"{base_url}/chat/completions"
+    resp = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=body,
+        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+    )
+    resp.raise_for_status()
+    data = resp.json()
 
-    content = (
-        data.get("choices", [{}])[0]
-        .get("message", {})
-        .get("content", "")
-        or ""
-    ).strip()
+    content = (data.get("choices", [{}])[0].get("message", {}) or {}).get("content", "") or ""
+    content = content.strip()
     if not content:
         raise RuntimeError("DeepSeek returned empty content.")
     return json.loads(content)
 
 
 router = APIRouter(tags=["serverAI"])
+
+
+@router.get("/")
+def root():
+    return {"ok": True}
 
 
 @router.get("/health")
@@ -207,6 +214,9 @@ async def match_metrics(
     metrics_json: str = Form(..., description="Raw JSON string from GET /api/health-metrics/{patientId}"),
     pdf: UploadFile = File(..., description="PDF lab report"),
 ):
+    t0 = time.time()
+
+    # Parse metrics JSON
     try:
         api_json = json.loads(metrics_json)
     except Exception:
@@ -216,6 +226,7 @@ async def match_metrics(
     if not A:
         raise HTTPException(status_code=400, detail="Cannot extract metrics A: missing data[] or empty data.")
 
+    # Read PDF bytes
     if pdf.content_type not in ("application/pdf", "application/octet-stream"):
         raise HTTPException(status_code=400, detail=f"Invalid content_type for pdf: {pdf.content_type}")
 
@@ -225,56 +236,70 @@ async def match_metrics(
 
     log(f"Received metrics_json length={len(metrics_json)}, metrics_count={len(A)}, pdf_size={len(pdf_bytes)} bytes")
 
+    # Extract text (limited)
+    t1 = time.time()
     try:
         pdf_text = pdf_bytes_to_text(pdf_bytes)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {exc}")
 
-    if not pdf_text.strip():
-        raise HTTPException(
-            status_code=422,
-            detail="Extracted PDF text is empty. PDF may be scanned image; OCR is needed.",
-        )
+    pdf_text = _normalize_text(pdf_text)
 
+    if not pdf_text.strip():
+        raise HTTPException(status_code=422, detail="Extracted PDF text is empty. PDF may be scanned image; OCR is needed.")
+
+    # Truncate to reduce token/memory + speed up LLM
+    if len(pdf_text) > MAX_PDF_TEXT_CHARS:
+        pdf_text = pdf_text[:MAX_PDF_TEXT_CHARS] + "\n\n[TRUNCATED]"
+    log(f"PDF extract done in {time.time()-t1:.2f}s, pdf_text_chars={len(pdf_text)}")
+
+    # Call DeepSeek
+    t2 = time.time()
     try:
         result = deepseek_one_shot(A, pdf_text)
     except Exception as exc:
         log(f"DeepSeek error: {exc}")
         raise HTTPException(status_code=500, detail=f"DeepSeek call failed: {exc}")
+    log(f"DeepSeek done in {time.time()-t2:.2f}s")
 
     matches = result.get("matches", []) or []
     records_template = result.get("records_template", []) or []
-    lab_items = result.get("lab_items", []) or []
 
-    return JSONResponse(
-        {
-            "success": True,
-            "data": {
-                "matches": matches,
-                "records_template": records_template,
-                "lab_items": lab_items,
-                "posting_guide": {
-                    "origin_endpoint": "/api/health-metrics/{patientId}/{metricId}/values",
-                    "note": "Client must provide patientId when posting to origin system. Use metricId from records_template.metricId and body as-is.",
+    # Trả về cho client: đủ để client tự POST lại API gốc (client tự nhập patientId)
+    out = {
+        "success": True,
+        "data": {
+            "matches": matches,
+            "records_template": records_template,
+            "posting_guide": {
+                "origin_endpoint": "/api/health-metrics/{patientId}/{metricId}/values",
+                "example": {
+                    "path": "/api/health-metrics/{patientId}/{metricId}/values",
+                    "body": {"value": 95, "time": "2024-01-15T08:00:00.000Z"},
                 },
+                "note": "Client must provide patientId when posting to origin system. Use metricId from records_template.metricId and body as-is.",
             },
-        }
-    )
+        },
+        "meta": {
+            "max_pdf_pages": MAX_PDF_PAGES,
+            "max_pdf_text_chars": MAX_PDF_TEXT_CHARS,
+            "elapsed_sec": round(time.time() - t0, 3),
+        },
+    }
+
+    return JSONResponse(out)
 
 
 def create_server_ai_app() -> FastAPI:
     app = FastAPI(
         title="serverAI",
-        description=(
-            "Parse PDF + match to patient-specific metrics, returning payload templates to POST back to origin system."
-        ),
-        version="1.0.0",
+        description="Parse PDF + match to patient-specific metrics, returning payload templates to POST back to origin system.",
+        version="1.0.1",
     )
     app.include_router(router)
     return app
 
 
 app = create_server_ai_app()
-
 
 __all__ = ["app", "router", "create_server_ai_app"]
