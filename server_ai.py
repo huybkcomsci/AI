@@ -24,6 +24,7 @@ import io
 import json
 from typing import Any, Dict, List
 
+import requests
 from fastapi import APIRouter, FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -75,20 +76,15 @@ def pdf_bytes_to_text(pdf_bytes: bytes) -> str:
 
 
 def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
+    """Call DeepSeek via HTTP; avoid OpenAI SDK quirks on managed hosts."""
     api_key = Config.DEEPSEEK_API_KEY or None
     base_url = Config.DEEPSEEK_BASE_URL.rstrip("/") if hasattr(Config, "DEEPSEEK_BASE_URL") else ""
     model = getattr(Config, "MODEL", "deepseek-chat")
+    timeout = getattr(Config, "REQUEST_TIMEOUT", 30)
     if not api_key:
         raise RuntimeError("Missing DEEPSEEK_API_KEY env var.")
 
-    try:
-        from openai import OpenAI  # type: ignore
-    except Exception as exc:  # pragma: no cover - import error is runtime env issue
-        raise RuntimeError("openai package is required for DeepSeek call.") from exc
-
-    client = OpenAI(api_key=api_key, base_url=base_url or "https://api.deepseek.com")
-
-    payload = {
+    prompt_payload = {
         "task": (
             "Extract lab test results from PDF text, match them to API metrics list A, "
             "and prepare record templates for posting to the origin system"
@@ -154,11 +150,11 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
         },
     }
 
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
+    body = {
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
             {
                 "role": "system",
                 "content": (
@@ -167,11 +163,28 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
                     "Do not hallucinate values not present in the report."
                 ),
             },
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            {"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)},
         ],
-    )
+    }
 
-    content = (resp.choices[0].message.content or "").strip()
+    try:
+        resp = requests.post(
+            f"{base_url or 'https://api.deepseek.com'}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=body,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise RuntimeError(f"DeepSeek HTTP call failed: {exc}") from exc
+
+    content = (
+        data.get("choices", [{}])[0]
+        .get("message", {})
+        .get("content", "")
+        or ""
+    ).strip()
     if not content:
         raise RuntimeError("DeepSeek returned empty content.")
     return json.loads(content)
