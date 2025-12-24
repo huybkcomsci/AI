@@ -92,6 +92,9 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
     api_key = getattr(Config, "DEEPSEEK_API_KEY", None) or None
     base_url = getattr(Config, "DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
     model = getattr(Config, "MODEL", "deepseek-chat")
+    connect_timeout = getattr(Config, "REQUEST_CONNECT_TIMEOUT", CONNECT_TIMEOUT)
+    read_timeout = getattr(Config, "REQUEST_READ_TIMEOUT", READ_TIMEOUT)
+    total_timeout = getattr(Config, "REQUEST_TIMEOUT", READ_TIMEOUT + CONNECT_TIMEOUT)
 
     if not api_key:
         raise RuntimeError("Missing DEEPSEEK_API_KEY env var.")
@@ -180,12 +183,20 @@ def deepseek_one_shot(A: List[Dict[str, Any]], pdf_text: str) -> Dict[str, Any]:
     }
 
     url = f"{base_url}/chat/completions"
+    log(
+        f"Calling DeepSeek model={model} A={len(A)} pdf_chars={len(pdf_text)} "
+        f"url={url} t_connect={connect_timeout}s t_read={read_timeout}s t_total={total_timeout}s"
+    )
+
+    t0 = time.time()
     resp = requests.post(
         url,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         json=body,
-        timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        timeout=(connect_timeout, read_timeout),
     )
+    elapsed = time.time() - t0
+    log(f"DeepSeek HTTP status={resp.status_code} elapsed={elapsed:.2f}s")
     resp.raise_for_status()
     data = resp.json()
 

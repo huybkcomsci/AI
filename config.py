@@ -20,6 +20,8 @@ class Config:
     
     # API timeout
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "600"))
+    REQUEST_READ_TIMEOUT = int(os.getenv("REQUEST_READ_TIMEOUT_SECONDS", "600"))
+    REQUEST_CONNECT_TIMEOUT = int(os.getenv("REQUEST_CONNECT_TIMEOUT_SECONDS", "10"))
     
     @classmethod
     def is_deepseek_available(cls):
